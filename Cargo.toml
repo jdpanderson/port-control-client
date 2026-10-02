@@ -1,0 +1,57 @@
+[package]
+name = "port-control-client"
+version = "0.1.0"
+description = "A router port mapping client for PCP, NAT-PMP and UPnP IGD, for Tokio"
+authors = ["Jonathan Anderson <janderson@janderson.ca>"]
+edition = "2024"
+# Edition 2024 and getrandom 0.4 need 1.85; CI checks it.
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jdpanderson/port-control-client"
+readme = "README.md"
+keywords = ["nat", "upnp", "pcp", "nat-pmp", "port-mapping"]
+categories = ["network-programming", "asynchronous"]
+include = ["/src", "/tests", "/examples", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+# Listen for restart announcements from PCP and NAT-PMP routers; see
+# `Config::restart_announcements`.
+restart-announcements = ["dep:socket2"]
+
+# The lowest versions are tested in CI (the minimal-versions job).
+[dependencies]
+getrandom = "0.4"
+httparse = "1.10"
+roxmltree = { version = "0.21", default-features = false, features = ["std"] }
+# Socket options for the restart announcement port. Tokio uses it too.
+socket2 = { version = "0.6", features = ["all"], optional = true }
+tokio = { version = "1.38", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tracing = "0.1.6"
+
+# The routing table, for the default gateway.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.172"
+
+[dev-dependencies]
+tokio = { version = "1.38", features = ["rt-multi-thread", "signal"] }
+
+[lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+unreachable_pub = "warn"
+# `cargo fuzz` builds with `--cfg fuzzing`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+unsafe_code = "deny"
+
+[lints.clippy]
+allow_attributes = "warn"
+borrow_as_ptr = "warn"
+dbg_macro = "warn"
+return_self_not_must_use = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+unimplemented = "warn"

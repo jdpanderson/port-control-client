@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <specVersion><major>1</major><minor>0</minor></specVersion>
+  <URLBase>http://192.168.1.1:5000/</URLBase>
+  <device>
+    <deviceType>urn:schemas-upnp-org:device:InternetGatewayDevice:1</deviceType>
+    <deviceList><device>
+      <deviceType>urn:schemas-upnp-org:device:WANDevice:1</deviceType>
+      <deviceList><device>
+        <deviceType>urn:schemas-upnp-org:device:WANConnectionDevice:1</deviceType>
+        <serviceList>
+          <service>
+            <serviceType>urn:schemas-upnp-org:service:WANPPPConnection:1</serviceType>
+            <controlURL>/ctl/PPPConn</controlURL>
+          </service>
+          <service>
+            <serviceType>urn:schemas-upnp-org:service:WANIPConnection:2</serviceType>
+            <controlURL>ctl/IPConn</controlURL>
+          </service>
+        </serviceList>
+      </device></deviceList>
+    </device></deviceList>
+  </device>
+</root>

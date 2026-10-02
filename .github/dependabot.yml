@@ -1,0 +1,20 @@
+# Weekly updates for the pinned GitHub Actions and for Cargo.lock.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  # Only the lockfile: the version floors in Cargo.toml stay as low as the
+  # minimal-versions job proves they can be.
+  - package-ecosystem: cargo
+    directories: ["/", "/fuzz"]
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo:
+        patterns: ["*"]
