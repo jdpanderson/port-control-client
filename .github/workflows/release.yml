@@ -1,0 +1,101 @@
+name: Release
+
+# Pushing a tag vX.Y.Z runs every CI check, publishes that version to
+# crates.io, and makes a GitHub release with its CHANGELOG section. See
+# RELEASING.md.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish
+    needs: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # crates.io trusts only this environment, which can require a reviewer.
+    environment: release
+    permissions:
+      contents: write # the GitHub release
+      id-token: write # crates.io trusted publishing
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select stable Rust
+        run: rustup update stable --no-self-update
+      - name: Check the tag, the version and the changelog
+        id: version
+        run: |
+          version=$(cargo metadata --no-deps --locked --format-version 1 |
+            jq -r '.packages[] | select(.name == "port-control-client") | .version')
+          if [[ "$TAG" != "v$version" ]]; then
+            echo "::error::tag $TAG does not match version $version"
+            exit 1
+          fi
+          # The release notes: this version's section of the changelog,
+          # without the link definitions at its end.
+          awk -v heading="## [$version]" '
+            index($0, heading) == 1 { on = 1; next }
+            on && /^## \[/ { exit }
+            on && /^\[[^]]*\]: / { next }
+            on { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "::error::CHANGELOG.md has no section for $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # The first release is published manually. A rerun after a failure may
+      # also find its version there.
+      - name: Look for this version on crates.io
+        id: published
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            -A "port-control-client release (https://github.com/jdpanderson/port-control-client)" \
+            "https://crates.io/api/v1/crates/port-control-client/$VERSION")
+          case "$status" in
+            200) echo "::notice::$VERSION is already on crates.io"
+                 echo "found=true" >> "$GITHUB_OUTPUT" ;;
+            404) ;;
+            *) echo "::error::crates.io answered $status"; exit 1 ;;
+          esac
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+        if: steps.published.outputs.found != 'true'
+      - name: Publish to crates.io
+        if: steps.published.outputs.found != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked
+      - name: Make the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          else
+            # Only a plain vX.Y.Z tag is a full release; a suffix such as
+            # -rc.1 makes a prerelease.
+            flags=()
+            [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || flags+=(--prerelease)
+            gh release create "$TAG" --verify-tag --title "$TAG" \
+              --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"
+          fi

@@ -1,0 +1,225 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # The release workflow runs every check before it publishes.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Linux and macOS each have their own gateway lookup; Windows has none,
+  # so there only UPnP is tried.
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select stable Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup component add rustfmt clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+      # With and without the optional feature.
+      - name: Lint
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Test
+        run: |
+          cargo test --locked
+          cargo test --locked --all-features
+      - name: Docs
+        if: runner.os == 'Linux'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps --all-features
+
+  # The oldest Rust in `rust-version` must still build everything.
+  msrv:
+    name: Minimum Rust version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select the minimum Rust
+        run: |
+          version=$(cargo metadata --no-deps --locked --format-version 1 |
+            jq -r '.packages[] | select(.name == "port-control-client") | .rust_version')
+          rustup toolchain install "$version" --profile minimal --no-self-update
+          echo "RUSTUP_TOOLCHAIN=$version" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build
+        run: cargo check --locked --all-targets --all-features
+
+  # The lowest dependency versions that Cargo.toml allows must still pass,
+  # on the minimum Rust. macOS also checks the libc floor.
+  minimal-versions:
+    name: Minimal versions (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select nightly (for the resolver) and the minimum Rust
+        run: |
+          rustup toolchain install nightly --profile minimal --no-self-update
+          version=$(cargo metadata --no-deps --locked --format-version 1 |
+            jq -r '.packages[] | select(.name == "port-control-client") | .rust_version')
+          rustup toolchain install "$version" --profile minimal --no-self-update
+          echo "MSRV=$version" >> "$GITHUB_ENV"
+      - name: Choose the lowest allowed version of each direct dependency
+        run: cargo +nightly update -Z direct-minimal-versions
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Test
+        run: cargo +"$MSRV" test --all-features
+
+  # Line coverage of the library code only: the tests (`tests.rs` files)
+  # and the fake routers do not count. Only failures the tests cannot cause
+  # on Linux are left out: the operating system's random source failing,
+  # receive errors on a socket, and an IPv6 sender on an IPv4 socket.
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select stable Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup component add llvm-tools-preview
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked --version 0.9.1
+      - name: Measure
+        run: >
+          cargo llvm-cov --locked --all-features --summary-only
+          --ignore-filename-regex '(fake|/tests)\.rs$'
+          --fail-under-lines 99
+
+  # Each parser of data from the network runs under libFuzzer for a short
+  # time, starting from the seeds in fuzz/seeds. A crash is kept as an
+  # artifact of the run.
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select nightly Rust
+        run: rustup toolchain install nightly --profile minimal --no-self-update
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version 0.13.2
+      - name: Fuzz each target for 30 seconds
+        run: |
+          for target in $(cargo fuzz list); do
+            mkdir -p "fuzz/corpus/$target"
+            cargo fuzz run "$target" "fuzz/corpus/$target" "fuzz/seeds/$target" -- -max_total_time=30
+          done
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: failure()
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
+
+  # The public API against the latest release on crates.io: a breaking
+  # change needs a new major version (minor, before 1.0). Skipped until the
+  # crate is on crates.io.
+  semver:
+    name: Semver
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Look for a release on crates.io
+        id: release
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            -A "port-control-client CI (https://github.com/jdpanderson/port-control-client)" \
+            https://crates.io/api/v1/crates/port-control-client)
+          case "$status" in
+            200) echo "found=true" >> "$GITHUB_OUTPUT" ;;
+            404) echo "::notice::port-control-client is not on crates.io yet: no release to compare with" ;;
+            *) echo "::error::crates.io answered $status"; exit 1 ;;
+          esac
+      - name: Select stable Rust
+        if: steps.release.outputs.found == 'true'
+        run: rustup update stable --no-self-update
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.release.outputs.found == 'true'
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-semver-checks
+        if: steps.release.outputs.found == 'true'
+        run: cargo install cargo-semver-checks --locked --version 0.50.0
+      - name: Check
+        if: steps.release.outputs.found == 'true'
+        run: cargo semver-checks
+
+  # Security advisories, licenses and sources of the dependencies (deny.toml).
+  deny:
+    name: Dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check

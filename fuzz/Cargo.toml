@@ -1,0 +1,79 @@
+[package]
+name = "port-control-client-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+port-control-client = { path = "..", features = ["restart-announcements"] }
+
+# Not part of a workspace with the crate.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "pcp_reply"
+path = "fuzz_targets/pcp_reply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nat_pmp_reply"
+path = "fuzz_targets/nat_pmp_reply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "announcement"
+path = "fuzz_targets/announcement.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssdp_reply"
+path = "fuzz_targets/ssdp_reply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_response"
+path = "fuzz_targets/http_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "device_description"
+path = "fuzz_targets/device_description.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "soap"
+path = "fuzz_targets/soap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "url"
+path = "fuzz_targets/url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proc_route"
+path = "fuzz_targets/proc_route.rs"
+test = false
+doc = false
+bench = false
