@@ -16,62 +16,64 @@ fn announcements() {
 
 #[test]
 fn not_announcements() {
-    // Short, an error result, a MAP response.
-    assert_eq!(parse(&PCP_ANNOUNCE[..23], Kind::Pcp), None);
-    assert_eq!(parse(&NAT_PMP_ANNOUNCE[..11], Kind::NatPmp), None);
-    let mut b = PCP_ANNOUNCE;
-    b[3] = 1;
-    assert_eq!(parse(&b, Kind::Pcp), None);
-    let mut b = PCP_ANNOUNCE;
-    b[1] = 0x81;
-    assert_eq!(parse(&b, Kind::Pcp), None);
-    let mut b = NAT_PMP_ANNOUNCE;
-    b[3] = 3;
-    assert_eq!(parse(&b, Kind::NatPmp), None);
+    let with = |mut b: Vec<u8>, at: usize, value: u8| {
+        b[at] = value;
+        b
+    };
+    let cases = [
+        // Short.
+        (PCP_ANNOUNCE[..23].to_vec(), Kind::Pcp),
+        (NAT_PMP_ANNOUNCE[..11].to_vec(), Kind::NatPmp),
+        // An error result.
+        (with(PCP_ANNOUNCE.to_vec(), 3, 1), Kind::Pcp),
+        (with(NAT_PMP_ANNOUNCE.to_vec(), 3, 3), Kind::NatPmp),
+        // A MAP response.
+        (with(PCP_ANNOUNCE.to_vec(), 1, 0x81), Kind::Pcp),
+    ];
+    for (b, kind) in cases {
+        assert_eq!(parse(&b, kind), None, "{kind:?} {b:?}");
+    }
 }
 
-/// Whether `next`, `secs` seconds after an epoch time of 1000, shows a
-/// lost state.
-fn lost(kind: Kind, secs: u64, next: u32) -> bool {
+#[test]
+fn epochs() {
+    // The kind, the seconds since an epoch time of 1000, the next epoch
+    // time, and whether it shows a lost state.
+    let cases = [
+        // No time passed.
+        (Kind::Pcp, 0, 1000, false),
+        (Kind::NatPmp, 0, 1000, false),
+        // Both clocks move together, or nearly so.
+        (Kind::Pcp, 100, 1100, false),
+        (Kind::Pcp, 100, 1095, false),
+        // Back by one second, as when replies come in another order.
+        (Kind::Pcp, 0, 999, false),
+        // A restart.
+        (Kind::Pcp, 0, 998, true),
+        (Kind::Pcp, 100, 3, true),
+        // The server's clock runs too fast, or too slow.
+        (Kind::Pcp, 100, 1200, true),
+        (Kind::Pcp, 100, 1050, true),
+        // Exactly at each limit, the epoch time is still valid.
+        // 98 + 2 = 106 - 106 / 16
+        (Kind::Pcp, 98, 1106, false),
+        // 150 + 2 = 152, not less than 160 - 160 / 16 = 150
+        (Kind::Pcp, 150, 1160, false),
+        // 103 + 2 = 112 - 112 / 16
+        (Kind::Pcp, 112, 1103, false),
+        // 149 + 2 = 151, not less than 160 - 160 / 16 = 150
+        (Kind::Pcp, 160, 1149, false),
+        // 7/8 of 80 seconds is 70: up to 2 seconds less is still valid.
+        (Kind::NatPmp, 80, 1080, false),
+        (Kind::NatPmp, 80, 1068, false),
+        (Kind::NatPmp, 80, 1067, true),
+        (Kind::NatPmp, 0, 0, true),
+    ];
     let epoch = Epoch::new(1000);
-    epoch.lost(kind, next, epoch.at + Duration::from_secs(secs))
-}
-
-#[test]
-fn pcp_epochs() {
-    // Both clocks move together, or nearly so.
-    assert!(!lost(Kind::Pcp, 100, 1100));
-    assert!(!lost(Kind::Pcp, 100, 1095));
-    // Back by one second, as when replies come in another order.
-    assert!(!lost(Kind::Pcp, 0, 999));
-    // A restart.
-    assert!(lost(Kind::Pcp, 0, 998));
-    assert!(lost(Kind::Pcp, 100, 3));
-    // The server's clock runs too fast, or too slow.
-    assert!(lost(Kind::Pcp, 100, 1200));
-    assert!(lost(Kind::Pcp, 100, 1050));
-}
-
-#[test]
-fn pcp_epoch_limits() {
-    // Exactly at each limit, the epoch time is still valid.
-    // 98 + 2 = 106 - 106 / 16
-    assert!(!lost(Kind::Pcp, 98, 1106));
-    // 150 + 2 = 152, not less than 160 - 160 / 16 = 150
-    assert!(!lost(Kind::Pcp, 150, 1160));
-    // 103 + 2 = 112 - 112 / 16
-    assert!(!lost(Kind::Pcp, 112, 1103));
-    // 149 + 2 = 151, not less than 160 - 160 / 16 = 150
-    assert!(!lost(Kind::Pcp, 160, 1149));
-}
-
-#[test]
-fn nat_pmp_epochs() {
-    // 7/8 of 80 seconds is 70: up to 2 seconds less is still valid.
-    assert!(!lost(Kind::NatPmp, 80, 1080));
-    assert!(!lost(Kind::NatPmp, 80, 1068));
-    assert!(lost(Kind::NatPmp, 80, 1067));
-    assert!(lost(Kind::NatPmp, 0, 0));
+    for (kind, secs, next, want) in cases {
+        let got = epoch.lost(kind, next, epoch.at + Duration::from_secs(secs));
+        assert_eq!(got, want, "{kind:?} after {secs} s: {next}");
+    }
 }
 
 #[test]
@@ -81,7 +83,6 @@ fn extreme_epochs() {
     let later = epoch.at + Duration::from_secs(u64::from(u32::MAX) * 4);
     for kind in [Kind::Pcp, Kind::NatPmp] {
         assert!(epoch.lost(kind, 0, later));
-        assert!(!lost(kind, 0, 1000));
     }
 }
 

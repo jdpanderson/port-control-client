@@ -59,20 +59,11 @@ fn delete_has_no_suggestion() {
 
 #[test]
 fn short_lifetime_errors() {
-    assert!(matches!(
-        refused(8),
-        Failure::Refused {
-            temporary: true,
-            ..
-        }
-    ));
-    assert!(matches!(
-        refused(2),
-        Failure::Refused {
-            temporary: false,
-            ..
-        }
-    ));
+    for (code, want) in [(8, true), (2, false)] {
+        let got = refused(code);
+        let ok = matches!(got, Failure::Refused { temporary, .. } if temporary == want);
+        assert!(ok, "{code}: {got:?}");
+    }
 }
 
 #[test]
@@ -93,12 +84,16 @@ fn success() {
 #[test]
 fn ignores_replies_to_other_requests() {
     let external = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 5), 40000);
-    let other = [9; 12];
-    let b = response(0, 3600, &other, external);
-    assert!(parse_map_response(&b, &NONCE, Protocol::Udp, 51820).is_none());
     let b = response(0, 3600, &NONCE, external);
-    assert!(parse_map_response(&b, &NONCE, Protocol::Tcp, 51820).is_none());
-    assert!(parse_map_response(&b, &NONCE, Protocol::Udp, 1).is_none());
+    // Another nonce, protocol or port.
+    for (nonce, protocol, port) in [
+        ([9; 12], Protocol::Udp, 51820),
+        (NONCE, Protocol::Tcp, 51820),
+        (NONCE, Protocol::Udp, 1),
+    ] {
+        let got = parse_map_response(&b, &nonce, protocol, port);
+        assert!(got.is_none(), "{nonce:?} {protocol} {port}");
+    }
 }
 
 #[test]
@@ -122,27 +117,31 @@ fn nat_pmp_server() {
 
 #[test]
 fn not_replies() {
-    assert!(parse_map_response(&[], &NONCE, Protocol::Udp, 51820).is_none());
     let any = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0);
-    let mut b = response(0, 3600, &NONCE, any);
-    // Too short for a header, or a reply to another opcode (PEER).
-    assert!(parse_map_response(&b[..10], &NONCE, Protocol::Udp, 51820).is_none());
-    b[1] = RESPONSE | 2;
-    assert!(parse_map_response(&b, &NONCE, Protocol::Udp, 51820).is_none());
+    let b = response(0, 3600, &NONCE, any);
+    // A reply to another opcode (PEER).
+    let mut peer = b.clone();
+    peer[1] = RESPONSE | 2;
+    // Empty, or too short for a header.
+    for b in [&[][..], &b[..10], &peer] {
+        let got = parse_map_response(b, &NONCE, Protocol::Udp, 51820);
+        assert!(got.is_none(), "{b:?}");
+    }
 }
 
 #[test]
 fn bad_replies() {
     let external = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 5), 40000);
-    let mut b = response(0, 3600, &NONCE, external);
-    // A success with no MAP data.
-    let got = parse_map_response(&b[..HEADER_LEN], &NONCE, Protocol::Udp, 51820);
-    assert!(matches!(got, Some(Err(Failure::BadReply(_)))));
+    let b = response(0, 3600, &NONCE, external);
     // An IPv6 external address.
-    let ipv6: Ipv6Addr = "2001:db8::1".parse().unwrap();
-    b[44..60].copy_from_slice(&ipv6.octets());
-    let got = parse_map_response(&b, &NONCE, Protocol::Udp, 51820);
-    assert!(matches!(got, Some(Err(Failure::BadReply(_)))));
+    let mut ipv6 = b.clone();
+    let addr: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    ipv6[44..60].copy_from_slice(&addr.octets());
+    // A success with no MAP data.
+    for b in [&b[..HEADER_LEN], &ipv6] {
+        let got = parse_map_response(b, &NONCE, Protocol::Udp, 51820);
+        assert!(matches!(got, Some(Err(Failure::BadReply(_)))), "{b:?}");
+    }
 }
 
 #[test]
@@ -156,15 +155,21 @@ fn grants_that_are_not_mappings() {
         };
         granted.lease(Ipv4Addr::LOCALHOST, server, NONCE, Protocol::Udp, 51820)
     };
-    let external = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 5), 40000);
-    assert!(lease(3600, external).is_ok());
-    assert!(matches!(lease(0, external), Err(Failure::BadReply(_))));
-    let none = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0);
-    assert!(matches!(lease(3600, none), Err(Failure::BadReply(_))));
-    let no_port = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 5), 0);
-    assert!(matches!(lease(3600, no_port), Err(Failure::BadReply(_))));
-    let no_ip = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 40000);
-    assert!(matches!(lease(3600, no_ip), Err(Failure::BadReply(_))));
+    let ip = Ipv4Addr::new(203, 0, 113, 5);
+    assert!(lease(3600, SocketAddrV4::new(ip, 40000)).is_ok());
+    // No lifetime, no address, no port, or neither.
+    for (lifetime, ip, port) in [
+        (0, ip, 40000),
+        (3600, Ipv4Addr::UNSPECIFIED, 40000),
+        (3600, ip, 0),
+        (3600, Ipv4Addr::UNSPECIFIED, 0),
+    ] {
+        let got = lease(lifetime, SocketAddrV4::new(ip, port));
+        assert!(
+            matches!(got, Err(Failure::BadReply(_))),
+            "{lifetime} {ip}:{port}"
+        );
+    }
 }
 
 #[tokio::test]

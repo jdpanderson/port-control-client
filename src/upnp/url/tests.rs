@@ -32,16 +32,18 @@ fn rejects() {
 #[test]
 fn join() {
     let base = url("http://192.168.1.1:5000/dev/rootDesc.xml");
-    assert_eq!(
-        base.join("/ctl/IPConn").unwrap().to_string(),
-        "http://192.168.1.1:5000/ctl/IPConn"
-    );
-    assert_eq!(base.join("ctl/IPConn").unwrap().path, "/dev/ctl/IPConn");
-    assert_eq!(
-        base.join("http://192.168.1.1:6000/x").unwrap().addr.port(),
-        6000
-    );
-    assert_eq!(base.join(""), None);
-    assert_eq!(base.join("//192.168.1.2/x"), None);
-    assert_eq!(base.join("ftp://192.168.1.1/x"), None);
+    for (reference, want) in [
+        ("/ctl/IPConn", Some("http://192.168.1.1:5000/ctl/IPConn")),
+        ("ctl/IPConn", Some("http://192.168.1.1:5000/dev/ctl/IPConn")),
+        (
+            "http://192.168.1.1:6000/x",
+            Some("http://192.168.1.1:6000/x"),
+        ),
+        ("", None),
+        ("//192.168.1.2/x", None),
+        ("ftp://192.168.1.1/x", None),
+    ] {
+        let got = base.join(reference).map(|u| u.to_string());
+        assert_eq!(got.as_deref(), want, "{reference:?}");
+    }
 }

@@ -27,13 +27,15 @@ fn location_must_be_the_sender() {
 #[test]
 fn not_a_reply() {
     let router = Ipv4Addr::new(192, 168, 1, 1);
-    assert_eq!(parse_reply(request(TARGETS[0]).as_bytes(), router), None);
-    assert_eq!(parse_reply(b"HTTP/1.1 404 Not Found\r\n\r\n", router), None);
-    // Not a success, even with a location.
-    let not_found = b"HTTP/1.1 404 Not Found\r\n\
-        LOCATION: http://192.168.1.1:5000/rootDesc.xml\r\n\r\n";
-    assert_eq!(parse_reply(not_found, router), None);
-    assert_eq!(parse_reply(b"\x00garbage", router), None);
+    for b in [
+        request(TARGETS[0]).as_bytes(),
+        b"HTTP/1.1 404 Not Found\r\n\r\n",
+        // Not a success, even with a location.
+        b"HTTP/1.1 404 Not Found\r\nLOCATION: http://192.168.1.1:5000/rootDesc.xml\r\n\r\n",
+        b"\x00garbage",
+    ] {
+        assert_eq!(parse_reply(b, router), None, "{}", b.escape_ascii());
+    }
 }
 
 /// Answers each search with a datagram that is not a reply, then a
@@ -112,9 +114,13 @@ async fn no_answer() {
 
 #[test]
 fn errors_about_one_datagram() {
-    assert!(skip(&io::Error::from(ErrorKind::ConnectionReset)));
-    assert!(skip(&io::Error::from(ErrorKind::ConnectionRefused)));
-    assert!(!skip(&io::Error::from(ErrorKind::PermissionDenied)));
+    for (kind, want) in [
+        (ErrorKind::ConnectionReset, true),
+        (ErrorKind::ConnectionRefused, true),
+        (ErrorKind::PermissionDenied, false),
+    ] {
+        assert_eq!(skip(&io::Error::from(kind)), want, "{kind}");
+    }
     // A datagram larger than the buffer is an error only on Windows.
     let too_large = io::Error::from_raw_os_error(WSAEMSGSIZE);
     assert_eq!(skip(&too_large), cfg!(windows));

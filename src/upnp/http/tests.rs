@@ -32,15 +32,6 @@ fn chunked() {
         }
     );
     assert_eq!(parse(&raw[..raw.len() - 6], false).unwrap(), None);
-    let bad = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nhello\r\n0\r\n\r\n";
-    assert!(parse(bad, false).is_err());
-}
-
-#[test]
-fn huge_chunk() {
-    // The chunk end is near u64::MAX: no overflow, no panic.
-    let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nFFFFFFFFFFFFFFEC\r\nx";
-    assert!(parse(raw, false).is_err());
 }
 
 #[test]
@@ -58,9 +49,17 @@ fn until_closed() {
 }
 
 #[test]
-fn not_http() {
-    assert!(parse(b"\x00\x01garbage\r\n\r\n", false).is_err());
-    assert!(parse(b"HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n", false).is_err());
+fn bad_responses() {
+    for raw in [
+        &b"\x00\x01garbage\r\n\r\n"[..],
+        b"HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n",
+        // A chunk longer than its size.
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nhello\r\n0\r\n\r\n",
+        // The chunk end is near u64::MAX: no overflow, no panic.
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nFFFFFFFFFFFFFFEC\r\nx",
+    ] {
+        assert!(parse(raw, false).is_err(), "{}", raw.escape_ascii());
+    }
 }
 
 #[test]
@@ -98,10 +97,10 @@ async fn the_size_limit() {
         b
     };
     // Device descriptions are a few kilobytes: the limit leaves room.
-    let got = get(&serving(response(64 * 1024)).await).await.unwrap();
-    assert_eq!(got.status, 200);
-    let got = get(&serving(response(MAX_RESPONSE)).await).await.unwrap();
-    assert_eq!(got.status, 200);
+    for size in [64 * 1024, MAX_RESPONSE] {
+        let got = get(&serving(response(size)).await).await.unwrap();
+        assert_eq!(got.status, 200, "{size}");
+    }
     let got = get(&serving(response(MAX_RESPONSE + 1)).await).await;
     assert!(
         matches!(got, Err(Failure::BadReply("HTTP response too large"))),

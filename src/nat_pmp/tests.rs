@@ -42,9 +42,14 @@ fn errors() {
 
 #[test]
 fn not_replies() {
-    assert!(parse_map_response(&[], Protocol::Udp, 51820).is_none());
-    // Too short for a header, or a reply to another opcode.
-    assert!(parse_map_response(&[0, 129], Protocol::Udp, 51820).is_none());
+    // Empty, or too short for a header.
+    for b in [&[][..], &[0, 129]] {
+        assert!(
+            parse_map_response(b, Protocol::Udp, 51820).is_none(),
+            "{b:?}"
+        );
+    }
+    // A reply to another opcode.
     assert!(parse_external_address(&[0, 129, 0, 0]).is_none());
 }
 
@@ -52,13 +57,14 @@ fn not_replies() {
 fn short_replies() {
     let got = parse_map_response(&[0, 129, 0, 0, 0, 0, 0, 9], Protocol::Udp, 51820);
     assert!(matches!(got, Some(Err(Failure::BadReply(_)))));
-    let got = parse_external_address(&[0, 128, 0, 0, 0, 0, 0, 9]);
-    assert!(matches!(got, Some(Err(Failure::BadReply(_)))));
-    // Only the 4-byte header: a refusal, or a success with no data.
+    // No address, or only the 4-byte header of a success.
+    for b in [&[0, 128, 0, 0, 0, 0, 0, 9][..], &[0, 128, 0, 0]] {
+        let got = parse_external_address(b);
+        assert!(matches!(got, Some(Err(Failure::BadReply(_)))), "{b:?}");
+    }
+    // Only the header of a refusal.
     let got = parse_external_address(&[0, 128, 0, 3]);
     assert!(matches!(got, Some(Err(Failure::Refused { code: 3, .. }))));
-    let got = parse_external_address(&[0, 128, 0, 0]);
-    assert!(matches!(got, Some(Err(Failure::BadReply(_)))));
 }
 
 /// A server that grants `lifetime`, with the internal port as the
@@ -84,12 +90,12 @@ async fn grants_that_are_not_mappings() {
     let (addr, _task) = server(3600, ip).await;
     let lease = map(addr, Protocol::Udp, 51820, 3600).await.unwrap();
     assert_eq!(lease.external, SocketAddrV4::new(ip, 51820));
-    let (addr, _task) = server(0, ip).await;
-    let got = map(addr, Protocol::Udp, 51820, 3600).await;
-    assert!(matches!(got, Err(Failure::BadReply(_))));
-    let (addr, _task) = server(3600, Ipv4Addr::UNSPECIFIED).await;
-    let got = map(addr, Protocol::Udp, 51820, 3600).await;
-    assert!(matches!(got, Err(Failure::BadReply(_))));
+    // No lifetime, or no external address.
+    for (lifetime, ip) in [(0, ip), (3600, Ipv4Addr::UNSPECIFIED)] {
+        let (addr, _task) = server(lifetime, ip).await;
+        let got = map(addr, Protocol::Udp, 51820, 3600).await;
+        assert!(matches!(got, Err(Failure::BadReply(_))), "{lifetime} {ip}");
+    }
 }
 
 #[tokio::test]

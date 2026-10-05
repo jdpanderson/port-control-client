@@ -534,24 +534,8 @@ async fn last_error_has_a_cause_for_each_protocol() {
 async fn last_error_shows_a_refusal() {
     let gateway = FakeIgd::start(IgdOptions::default()).await;
     gateway.refuse(606);
-    let config = config().methods([Method::Upnp]);
-    let mapping = PortMapping::start_with(config, targets(closed_port().await, gateway.ssdp));
-    until("the refusal", || mapping.last_error().is_some()).await;
-    let [(method, kind)] = causes(&mapping)[..] else {
-        panic!("{:?}", mapping.last_error());
-    };
-    assert_eq!(method, Some(Method::Upnp));
-    assert!(
-        matches!(
-            kind,
-            ErrorKind::Refused {
-                code: 606,
-                temporary: false,
-                ..
-            }
-        ),
-        "{kind:?}"
-    );
+    let mapping = upnp_error(&gateway).await;
+    assert_eq!(causes(&mapping), [refused(606)]);
     assert_eq!(mapping.mapping(), None);
 }
 
@@ -760,11 +744,7 @@ async fn nat_pmp_renews_with_the_granted_port() {
 #[tokio::test]
 async fn upnp_renews_the_same_mapping() {
     let gateway = FakeIgd::start(IgdOptions::default()).await;
-    let config = config()
-        .methods([Method::Upnp])
-        .lifetime(Duration::from_secs(2));
-    let mapping = PortMapping::start_with(config, targets(closed_port().await, gateway.ssdp));
-    granted(&mapping).await;
+    let mapping = upnp_mapping(&gateway, 2).await;
     let adds = || {
         gateway
             .calls()
@@ -884,6 +864,12 @@ async fn upnp_error(gateway: &FakeIgd) -> PortMapping {
     mapping
 }
 
+/// A permanent refusal from a UPnP gateway, as a cause.
+fn refused(code: u16) -> (Option<Method>, ErrorKind) {
+    let temporary = false;
+    (Some(Method::Upnp), ErrorKind::Refused { code, temporary })
+}
+
 /// The lease of each AddPortMapping call.
 fn leases(gateway: &FakeIgd) -> Vec<u32> {
     let calls = gateway.calls();
@@ -901,13 +887,7 @@ async fn upnp_permanent_leases_refused_too() {
     let mapping = upnp_error(&gateway).await;
     // One try with a permanent lease, then the error.
     assert_eq!(leases(&gateway), [7200, 0]);
-    let [(_, kind)] = causes(&mapping)[..] else {
-        panic!("{:?}", mapping.last_error());
-    };
-    assert!(
-        matches!(kind, ErrorKind::Refused { code: 725, .. }),
-        "{kind:?}"
-    );
+    assert_eq!(causes(&mapping), [refused(725)]);
 }
 
 #[tokio::test]
@@ -917,13 +897,7 @@ async fn upnp_tries_three_other_ports() {
     let mapping = upnp_error(&gateway).await;
     // The port, then three random ports.
     assert_eq!(leases(&gateway).len(), 4);
-    let [(_, kind)] = causes(&mapping)[..] else {
-        panic!("{:?}", mapping.last_error());
-    };
-    assert!(
-        matches!(kind, ErrorKind::Refused { code: 718, .. }),
-        "{kind:?}"
-    );
+    assert_eq!(causes(&mapping), [refused(718)]);
 }
 
 #[tokio::test]
@@ -963,9 +937,7 @@ async fn last_error_for_a_missing_description() {
         ..IgdOptions::default()
     };
     let gateway = FakeIgd::start(options).await;
-    let config = config().methods([Method::Upnp]);
-    let mapping = PortMapping::start_with(config, targets(closed_port().await, gateway.ssdp));
-    until("the error", || mapping.last_error().is_some()).await;
+    let mapping = upnp_error(&gateway).await;
     assert_eq!(
         causes(&mapping),
         [(Some(Method::Upnp), ErrorKind::HttpStatus(404))]
@@ -976,9 +948,7 @@ async fn last_error_for_a_missing_description() {
 async fn last_error_for_a_gateway_with_no_external_address() {
     let gateway = FakeIgd::start(IgdOptions::default()).await;
     gateway.set_external(Ipv4Addr::UNSPECIFIED);
-    let config = config().methods([Method::Upnp]);
-    let mapping = PortMapping::start_with(config, targets(closed_port().await, gateway.ssdp));
-    until("the error", || mapping.last_error().is_some()).await;
+    let mapping = upnp_error(&gateway).await;
     assert_eq!(
         causes(&mapping),
         [(Some(Method::Upnp), ErrorKind::BadReply)]
