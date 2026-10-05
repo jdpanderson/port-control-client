@@ -5,6 +5,13 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-05
+
+### Changed
+
+- No changes to the library. The tests check more cases with less code,
+  and the lockfile has newer patch versions of `libc`, `mio` and `tokio`.
+
 ## [0.2.0] - 2026-10-05
 
 ### Added

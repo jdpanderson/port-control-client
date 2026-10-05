@@ -1,6 +1,6 @@
 [package]
 name = "port-control-client"
-version = "0.2.0"
+version = "0.2.1"
 description = "A router port mapping client for PCP, NAT-PMP and UPnP IGD, for Tokio"
 authors = ["Jonathan Anderson <janderson@janderson.ca>"]
 edition = "2024"
