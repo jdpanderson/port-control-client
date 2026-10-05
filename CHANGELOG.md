@@ -5,6 +5,11 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `tracing` is built without its default features, so `tracing-attributes`
+  and its `syn` are no longer dependencies.
+
 ## [0.2.1] - 2026-10-05
 
 ### Changed

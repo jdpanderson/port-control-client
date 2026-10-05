@@ -36,7 +36,7 @@ roxmltree = { version = "0.21", default-features = false, features = ["std"], op
 # Socket options for the restart announcement port. Tokio uses it too.
 socket2 = { version = "0.6", features = ["all"], optional = true }
 tokio = { version = "1.38", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
-tracing = "0.1.6"
+tracing = { version = "0.1.6", default-features = false, features = ["std"] }
 
 # The routing table, for the default gateway.
 [target.'cfg(target_os = "macos")'.dependencies]
