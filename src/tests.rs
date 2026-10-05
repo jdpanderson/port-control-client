@@ -75,7 +75,9 @@ async fn until(what: &str, mut done: impl FnMut() -> bool) {
 #[tokio::test]
 async fn pcp_maps_renews_and_releases() {
     let router = FakePmp::start(Speaks::Pcp).await;
-    let config = config().lifetime(Duration::from_secs(2)).upnp(false);
+    let config = config()
+        .lifetime(Duration::from_secs(2))
+        .methods([Method::Pcp, Method::NatPmp]);
     let mapping = PortMapping::start_with(config, targets(router.port, no_ssdp().await));
     let external = SocketAddrV4::new(EXTERNAL_IP, GRANTED_PORT);
     assert_eq!(
@@ -117,8 +119,10 @@ async fn pcp_maps_renews_and_releases() {
 #[tokio::test]
 async fn nat_pmp_when_pcp_is_not_supported() {
     let router = FakePmp::start(Speaks::NatPmp).await;
-    let mapping =
-        PortMapping::start_with(config().upnp(false), targets(router.port, no_ssdp().await));
+    let mapping = PortMapping::start_with(
+        config().methods([Method::Pcp, Method::NatPmp]),
+        targets(router.port, no_ssdp().await),
+    );
     let external = SocketAddrV4::new(EXTERNAL_IP, PORT);
     assert_eq!(
         granted(&mapping).await,
@@ -151,8 +155,10 @@ async fn nat_pmp_when_pcp_is_not_supported() {
 async fn nat_pmp_maps_only_with_an_external_address() {
     let router = FakePmp::start(Speaks::NatPmp).await;
     router.set_external(Ipv4Addr::UNSPECIFIED);
-    let mapping =
-        PortMapping::start_with(config().upnp(false), targets(router.port, no_ssdp().await));
+    let mapping = PortMapping::start_with(
+        config().methods([Method::Pcp, Method::NatPmp]),
+        targets(router.port, no_ssdp().await),
+    );
     until("the error", || mapping.last_error().is_some()).await;
     assert_eq!(
         causes(&mapping).last(),
@@ -194,6 +200,28 @@ async fn upnp_when_nothing_answers_on_the_pmp_port() {
 }
 
 #[tokio::test]
+async fn no_nat_pmp_by_default() {
+    let router = FakePmp::start(Speaks::NatPmp).await;
+    let mapping = PortMapping::start_with(config(), targets(router.port, no_ssdp().await));
+    until("the error", || mapping.last_error().is_some()).await;
+    let methods: Vec<_> = causes(&mapping).into_iter().map(|(m, _)| m).collect();
+    assert_eq!(methods, [Some(Method::Pcp), Some(Method::Upnp)]);
+    let seen = router.requests();
+    assert!(matches!(seen[..], [PmpRequest::PcpMap { .. }]), "{seen:?}");
+}
+
+#[tokio::test]
+async fn tries_methods_in_the_configured_order() {
+    let router = FakePmp::start(Speaks::Pcp).await;
+    let gateway = FakeIgd::start(IgdOptions::default()).await;
+    let config = config().methods([Method::Upnp, Method::Pcp]);
+    let mapping = PortMapping::start_with(config, targets(router.port, gateway.ssdp));
+    assert_eq!(granted(&mapping).await.method, Method::Upnp);
+    mapping.stop().await;
+    assert_eq!(router.requests(), []);
+}
+
+#[tokio::test]
 async fn upnp_permanent_leases_and_taken_ports() {
     let options = IgdOptions {
         permanent_only: true,
@@ -202,7 +230,7 @@ async fn upnp_permanent_leases_and_taken_ports() {
         ..IgdOptions::default()
     };
     let gateway = FakeIgd::start(options).await;
-    let config = config().pcp(false).nat_pmp(false);
+    let config = config().methods([Method::Upnp]);
     let mapping = PortMapping::start_with(config, targets(closed_port().await, gateway.ssdp));
     let granted = granted(&mapping).await;
     assert_eq!(granted.method, Method::Upnp);
@@ -227,7 +255,9 @@ async fn upnp_permanent_leases_and_taken_ports() {
 #[tokio::test]
 async fn retries_after_the_interval() {
     let router = FakePmp::start(Speaks::Silent).await;
-    let config = config().upnp(false).retry_interval(Duration::from_secs(1));
+    let config = config()
+        .methods([Method::Pcp, Method::NatPmp])
+        .retry_interval(Duration::from_secs(1));
     let mapping = PortMapping::start_with(config, targets(router.port, no_ssdp().await));
     // Two sends for PCP and three for NAT-PMP, with no answer.
     until("the first attempt", || router.seen().len() >= 5).await;
@@ -239,7 +269,7 @@ async fn retries_after_the_interval() {
 async fn refresh_asks_again_at_once() {
     let router = FakePmp::start(Speaks::Silent).await;
     let config = config()
-        .upnp(false)
+        .methods([Method::Pcp, Method::NatPmp])
         .retry_interval(Duration::from_secs(3600));
     let mapping = PortMapping::start_with(config, targets(router.port, no_ssdp().await));
     until("the first attempt", || router.seen().len() >= 5).await;
@@ -255,7 +285,9 @@ async fn refresh_asks_again_at_once() {
 #[tokio::test]
 async fn keeps_the_mapping_until_it_expires() {
     let router = FakePmp::start(Speaks::Pcp).await;
-    let config = config().lifetime(Duration::from_secs(2)).upnp(false);
+    let config = config()
+        .lifetime(Duration::from_secs(2))
+        .methods([Method::Pcp, Method::NatPmp]);
     let mapping = PortMapping::start_with(config, targets(router.port, no_ssdp().await));
     granted(&mapping).await;
     let start = Instant::now();
@@ -273,7 +305,9 @@ async fn keeps_the_mapping_until_it_expires() {
 #[tokio::test]
 async fn clears_the_mapping_at_expiry_between_steps() {
     let router = FakePmp::start(Speaks::Pcp).await;
-    let config = config().lifetime(Duration::from_secs(4)).upnp(false);
+    let config = config()
+        .lifetime(Duration::from_secs(4))
+        .methods([Method::Pcp, Method::NatPmp]);
     let mapping = PortMapping::start_with(config, targets(router.port, no_ssdp().await));
     granted(&mapping).await;
     let start = Instant::now();
@@ -312,7 +346,9 @@ async fn renews_after_a_router_restart() {
     for speaks in [Speaks::Pcp, Speaks::NatPmp] {
         let router = FakePmp::start(speaks).await;
         let (targets, announce) = listening(router.port).await;
-        let config = config().upnp(false).restart_announcements(true);
+        let config = config()
+            .methods([Method::Pcp, Method::NatPmp])
+            .restart_announcements(true);
         let mapping = PortMapping::start_with(config, targets);
         granted(&mapping).await;
         assert_eq!(maps(&router, speaks), 1);
@@ -327,7 +363,7 @@ async fn renews_after_a_router_restart() {
 async fn listens_only_when_turned_on() {
     let router = FakePmp::start(Speaks::Pcp).await;
     let (targets, announce) = listening(router.port).await;
-    let mapping = PortMapping::start_with(config().upnp(false), targets);
+    let mapping = PortMapping::start_with(config().methods([Method::Pcp, Method::NatPmp]), targets);
     granted(&mapping).await;
     router.restart();
     router.announce(announce).await;
@@ -342,7 +378,9 @@ async fn maps_without_a_restart_listener() {
     let mut targets = targets(router.port, no_ssdp().await);
     // An address that is not on this host: the listener can't open.
     targets.announce.addr = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 0);
-    let config = config().upnp(false).restart_announcements(true);
+    let config = config()
+        .methods([Method::Pcp, Method::NatPmp])
+        .restart_announcements(true);
     let mapping = PortMapping::start_with(config, targets);
     assert_eq!(granted(&mapping).await.method, Method::Pcp);
 }
@@ -352,7 +390,9 @@ async fn maps_without_a_restart_listener() {
 async fn ignores_other_announcements() {
     let router = FakePmp::start(Speaks::Pcp).await;
     let (targets, announce) = listening(router.port).await;
-    let config = config().upnp(false).restart_announcements(true);
+    let config = config()
+        .methods([Method::Pcp, Method::NatPmp])
+        .restart_announcements(true);
     let mapping = PortMapping::start_with(config, targets);
     granted(&mapping).await;
     // An announcement with no restart, and a restart announcement from
@@ -374,7 +414,7 @@ async fn a_new_gateway_ends_the_mapping() {
         gateway: Gateway::Changing(gateway.clone()),
         ..targets(router.port, no_ssdp().await)
     };
-    let mapping = PortMapping::start_with(config().upnp(false), targets);
+    let mapping = PortMapping::start_with(config().methods([Method::Pcp, Method::NatPmp]), targets);
     granted(&mapping).await;
     // Another network, with no router at its gateway. The mapping ends
     // long before it expires, and no renewal goes to the old gateway.
@@ -387,8 +427,10 @@ async fn a_new_gateway_ends_the_mapping() {
 #[tokio::test]
 async fn dropping_the_handle_releases() {
     let router = FakePmp::start(Speaks::Pcp).await;
-    let mapping =
-        PortMapping::start_with(config().upnp(false), targets(router.port, no_ssdp().await));
+    let mapping = PortMapping::start_with(
+        config().methods([Method::Pcp, Method::NatPmp]),
+        targets(router.port, no_ssdp().await),
+    );
     granted(&mapping).await;
     drop(mapping);
     until("the release", || {
@@ -402,7 +444,7 @@ async fn dropping_the_handle_releases() {
 
 #[tokio::test]
 async fn nothing_to_try() {
-    let config = config().pcp(false).nat_pmp(false).upnp(false);
+    let config = config().methods([]);
     let mapping = PortMapping::start_with(config, targets(closed_port().await, no_ssdp().await));
     sleep(Duration::from_millis(100)).await;
     assert_eq!(mapping.mapping(), None);
@@ -416,8 +458,7 @@ async fn one_pcp_nonce_for_every_attempt() {
     // The server stays silent, so the task asks twice for a new mapping.
     let router = FakePmp::start(Speaks::Silent).await;
     let config = config()
-        .upnp(false)
-        .nat_pmp(false)
+        .methods([Method::Pcp])
         .retry_interval(Duration::from_secs(1));
     let mapping = PortMapping::start_with(config, targets(router.port, no_ssdp().await));
     // Two sends for each attempt.
@@ -436,7 +477,9 @@ async fn one_pcp_nonce_for_every_attempt() {
 
 #[tokio::test]
 async fn very_long_retry_interval() {
-    let config = config().upnp(false).retry_interval(Duration::MAX);
+    let config = config()
+        .methods([Method::Pcp, Method::NatPmp])
+        .retry_interval(Duration::MAX);
     let mapping = PortMapping::start_with(config, targets(closed_port().await, no_ssdp().await));
     // PCP and NAT-PMP fail immediately on a closed port; the task must then
     // wait, not panic, and still stop.
@@ -462,7 +505,9 @@ fn causes(mapping: &PortMapping) -> Vec<(Option<Method>, ErrorKind)> {
 #[tokio::test]
 async fn last_error_has_a_cause_for_each_protocol() {
     let router = FakePmp::start(Speaks::Silent).await;
-    let config = config().upnp(false).retry_interval(Duration::from_secs(1));
+    let config = config()
+        .methods([Method::Pcp, Method::NatPmp])
+        .retry_interval(Duration::from_secs(1));
     let mapping = PortMapping::start_with(config, targets(router.port, no_ssdp().await));
     assert_eq!(mapping.last_error(), None);
     until("the first error", || mapping.last_error().is_some()).await;
@@ -489,7 +534,7 @@ async fn last_error_has_a_cause_for_each_protocol() {
 async fn last_error_shows_a_refusal() {
     let gateway = FakeIgd::start(IgdOptions::default()).await;
     gateway.refuse(606);
-    let config = config().pcp(false).nat_pmp(false);
+    let config = config().methods([Method::Upnp]);
     let mapping = PortMapping::start_with(config, targets(closed_port().await, gateway.ssdp));
     until("the refusal", || mapping.last_error().is_some()).await;
     let [(method, kind)] = causes(&mapping)[..] else {
@@ -513,7 +558,9 @@ async fn last_error_shows_a_refusal() {
 #[tokio::test]
 async fn retries_a_failed_renewal_before_the_expiry() {
     let router = FakePmp::start(Speaks::Pcp).await;
-    let config = config().lifetime(Duration::from_secs(8)).upnp(false);
+    let config = config()
+        .lifetime(Duration::from_secs(8))
+        .methods([Method::Pcp, Method::NatPmp]);
     let mapping = PortMapping::start_with(config, targets(router.port, no_ssdp().await));
     granted(&mapping).await;
     router.speak(Speaks::Silent);
@@ -531,7 +578,7 @@ async fn retries_a_failed_renewal_before_the_expiry() {
 #[tokio::test]
 async fn each_task_has_its_own_nonce() {
     let router = FakePmp::start(Speaks::Pcp).await;
-    let config = config().upnp(false);
+    let config = config().methods([Method::Pcp, Method::NatPmp]);
     let first = PortMapping::start_with(config.clone(), targets(router.port, no_ssdp().await));
     granted(&first).await;
     let second = PortMapping::start_with(config, targets(router.port, no_ssdp().await));
@@ -568,7 +615,9 @@ fn random_fractions_are_from_0_to_1() {
 #[tokio::test]
 async fn last_error_while_renewal_fails() {
     let router = FakePmp::start(Speaks::Pcp).await;
-    let config = config().lifetime(Duration::from_secs(6)).upnp(false);
+    let config = config()
+        .lifetime(Duration::from_secs(6))
+        .methods([Method::Pcp, Method::NatPmp]);
     let mapping = PortMapping::start_with(config, targets(router.port, no_ssdp().await));
     granted(&mapping).await;
     router.speak(Speaks::Silent);
@@ -581,8 +630,10 @@ async fn last_error_while_renewal_fails() {
 #[tokio::test]
 async fn last_error_after_a_failed_release() {
     let router = FakePmp::start(Speaks::Pcp).await;
-    let mapping =
-        PortMapping::start_with(config().upnp(false), targets(router.port, no_ssdp().await));
+    let mapping = PortMapping::start_with(
+        config().methods([Method::Pcp, Method::NatPmp]),
+        targets(router.port, no_ssdp().await),
+    );
     granted(&mapping).await;
     router.speak(Speaks::Silent);
     mapping.stop().await;
@@ -591,7 +642,7 @@ async fn last_error_after_a_failed_release() {
 
 #[tokio::test]
 async fn last_error_when_every_protocol_is_off() {
-    let config = config().pcp(false).nat_pmp(false).upnp(false);
+    let config = config().methods([]);
     let mapping = PortMapping::start_with(config, targets(closed_port().await, no_ssdp().await));
     until("the error", || mapping.last_error().is_some()).await;
     assert_eq!(causes(&mapping), [(None, ErrorKind::NoProtocol)]);
@@ -612,7 +663,7 @@ fn config_limits() {
 async fn refresh_during_a_step_runs_the_next_step_at_once() {
     let router = FakePmp::start(Speaks::Silent).await;
     let config = config()
-        .upnp(false)
+        .methods([Method::Pcp, Method::NatPmp])
         .retry_interval(Duration::from_secs(3600));
     let mapping = PortMapping::start_with(config, targets(router.port, no_ssdp().await));
     // PCP has stopped after two sends; NAT-PMP is still trying, and gets
@@ -626,7 +677,9 @@ async fn refresh_during_a_step_runs_the_next_step_at_once() {
 #[tokio::test]
 async fn renewal_with_a_new_external_address() {
     let router = FakePmp::start(Speaks::Pcp).await;
-    let config = config().lifetime(Duration::from_secs(2)).upnp(false);
+    let config = config()
+        .lifetime(Duration::from_secs(2))
+        .methods([Method::Pcp, Method::NatPmp]);
     let mapping = PortMapping::start_with(config, targets(router.port, no_ssdp().await));
     granted(&mapping).await;
     let ip = Ipv4Addr::new(198, 51, 100, 7);
@@ -650,7 +703,7 @@ async fn a_refused_renewal_ends_the_mapping_at_once() {
     let router = FakePmp::start(Speaks::Pcp).await;
     let config = config()
         .lifetime(Duration::from_secs(6))
-        .upnp(false)
+        .methods([Method::Pcp, Method::NatPmp])
         .retry_interval(Duration::from_secs(3600));
     let mapping = PortMapping::start_with(config, targets(router.port, no_ssdp().await));
     granted(&mapping).await;
@@ -680,7 +733,9 @@ async fn a_refused_renewal_ends_the_mapping_at_once() {
 #[tokio::test]
 async fn nat_pmp_renews_with_the_granted_port() {
     let router = FakePmp::start(Speaks::NatPmp).await;
-    let config = config().lifetime(Duration::from_secs(2)).upnp(false);
+    let config = config()
+        .lifetime(Duration::from_secs(2))
+        .methods([Method::Pcp, Method::NatPmp]);
     let mapping = PortMapping::start_with(config, targets(router.port, no_ssdp().await));
     granted(&mapping).await;
     let maps = || {
@@ -706,8 +761,7 @@ async fn nat_pmp_renews_with_the_granted_port() {
 async fn upnp_renews_the_same_mapping() {
     let gateway = FakeIgd::start(IgdOptions::default()).await;
     let config = config()
-        .pcp(false)
-        .nat_pmp(false)
+        .methods([Method::Upnp])
         .lifetime(Duration::from_secs(2));
     let mapping = PortMapping::start_with(config, targets(closed_port().await, gateway.ssdp));
     granted(&mapping).await;
@@ -728,8 +782,7 @@ async fn upnp_renews_the_same_mapping() {
 /// A UPnP mapping with the given lifetime, after the gateway grants it.
 async fn upnp_mapping(gateway: &FakeIgd, lifetime: u64) -> PortMapping {
     let config = config()
-        .pcp(false)
-        .nat_pmp(false)
+        .methods([Method::Upnp])
         .lifetime(Duration::from_secs(lifetime));
     let mapping = PortMapping::start_with(config, targets(closed_port().await, gateway.ssdp));
     granted(&mapping).await;
@@ -825,7 +878,7 @@ async fn upnp_renewal_with_a_new_external_address() {
 
 /// Starts a UPnP mapping with `gateway`, and waits for the first error.
 async fn upnp_error(gateway: &FakeIgd) -> PortMapping {
-    let config = config().pcp(false).nat_pmp(false);
+    let config = config().methods([Method::Upnp]);
     let mapping = PortMapping::start_with(config, targets(closed_port().await, gateway.ssdp));
     until("the error", || mapping.last_error().is_some()).await;
     mapping
@@ -890,7 +943,9 @@ async fn last_error_without_a_default_gateway() {
         gateway: Gateway::Missing,
         ..targets(closed_port().await, no_ssdp().await)
     };
-    let mapping = PortMapping::start_with(config(), targets);
+    // PCP and NAT-PMP share one cause.
+    let config = config().methods([Method::Pcp, Method::Upnp, Method::NatPmp]);
+    let mapping = PortMapping::start_with(config, targets);
     until("the error", || mapping.last_error().is_some()).await;
     assert_eq!(
         causes(&mapping),
@@ -908,7 +963,7 @@ async fn last_error_for_a_missing_description() {
         ..IgdOptions::default()
     };
     let gateway = FakeIgd::start(options).await;
-    let config = config().pcp(false).nat_pmp(false);
+    let config = config().methods([Method::Upnp]);
     let mapping = PortMapping::start_with(config, targets(closed_port().await, gateway.ssdp));
     until("the error", || mapping.last_error().is_some()).await;
     assert_eq!(
@@ -921,7 +976,7 @@ async fn last_error_for_a_missing_description() {
 async fn last_error_for_a_gateway_with_no_external_address() {
     let gateway = FakeIgd::start(IgdOptions::default()).await;
     gateway.set_external(Ipv4Addr::UNSPECIFIED);
-    let config = config().pcp(false).nat_pmp(false);
+    let config = config().methods([Method::Upnp]);
     let mapping = PortMapping::start_with(config, targets(closed_port().await, gateway.ssdp));
     until("the error", || mapping.last_error().is_some()).await;
     assert_eq!(

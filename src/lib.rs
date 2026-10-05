@@ -1,8 +1,10 @@
 //! A router port mapping client for Tokio.
 //!
 //! `port-control-client` asks the router to forward a port to this host,
-//! renews the mapping, and removes it when you stop. It tries PCP (RFC
-//! 6887), then NAT-PMP (RFC 6886), then UPnP IGD (versions 1 and 2).
+//! renews the mapping, and removes it when you stop. It speaks PCP (RFC
+//! 6887), UPnP IGD (versions 1 and 2) and NAT-PMP (RFC 6886). By default it
+//! tries PCP, then UPnP; NAT-PMP is off. [`Config::methods`] changes the
+//! protocols and their order.
 //!
 //! IPv4 only. PCP and NAT-PMP need the default gateway, which the crate finds
 //! only on Linux and macOS. Other systems use only UPnP.
@@ -38,14 +40,23 @@ use std::{fmt, net::SocketAddrV4, num::NonZeroU16, time::Duration};
 
 use tokio::sync::{mpsc, oneshot, watch};
 
-#[cfg(feature = "restart-announcements")]
+#[cfg(not(any(feature = "pcp", feature = "nat-pmp", feature = "upnp")))]
+compile_error!("port-control-client needs at least one of the features pcp, nat-pmp and upnp");
+
+#[cfg(all(
+    feature = "restart-announcements",
+    any(feature = "pcp", feature = "nat-pmp")
+))]
 mod announce;
 mod error;
 mod gateway;
 mod mapper;
+#[cfg(feature = "nat-pmp")]
 mod nat_pmp;
+#[cfg(feature = "pcp")]
 mod pcp;
 mod udp;
+#[cfg(feature = "upnp")]
 mod upnp;
 
 // Entry points for the fuzz targets in `fuzz/`.
@@ -54,8 +65,11 @@ mod upnp;
 pub mod fuzz;
 
 #[cfg(test)]
+mod responder;
+// The tests of the whole task need every protocol.
+#[cfg(all(test, feature = "pcp", feature = "nat-pmp", feature = "upnp"))]
 mod fake;
-#[cfg(test)]
+#[cfg(all(test, feature = "pcp", feature = "nat-pmp", feature = "upnp"))]
 mod tests;
 
 // The README's example is compiled and checked as a doctest.
@@ -64,7 +78,6 @@ mod tests;
 struct ReadmeDoctests;
 
 pub use error::{Cause, Error, ErrorKind};
-use error::{Failure, Result};
 use mapper::{Command, Targets};
 
 /// The transport protocol of the port to map.
@@ -85,7 +98,10 @@ impl fmt::Display for Protocol {
     }
 }
 
-/// The protocol a router granted a mapping with.
+/// A port mapping protocol. Every variant exists in every build, but a
+/// protocol works only when its feature is on: `pcp`, `nat-pmp` or `upnp`.
+/// [`Config::methods`] can list one that is not built; trying it fails with
+/// [`ErrorKind::NotBuilt`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Method {
@@ -126,17 +142,26 @@ pub struct Config {
     lifetime: Duration,
     retry_interval: Duration,
     description: String,
-    pcp: bool,
-    nat_pmp: bool,
-    upnp: bool,
+    methods: Vec<Method>,
     #[cfg(feature = "restart-announcements")]
     restart_announcements: bool,
 }
 
 impl Config {
-    /// Maps `local_port` for `protocol`. All three protocols are on, the
-    /// lifetime is two hours, and a failed attempt is retried after one
-    /// minute.
+    /// The protocols to try, in order, by default: PCP, then UPnP, of those
+    /// that are built. PCP replaces UPnP, but few routers have it. NAT-PMP
+    /// is off, because few routers have it; add it with
+    /// [`methods`](Self::methods).
+    pub const DEFAULT_METHODS: &'static [Method] = &[
+        #[cfg(feature = "pcp")]
+        Method::Pcp,
+        #[cfg(feature = "upnp")]
+        Method::Upnp,
+    ];
+
+    /// Maps `local_port` for `protocol` with the protocols of
+    /// [`DEFAULT_METHODS`](Self::DEFAULT_METHODS). The lifetime is two
+    /// hours, and a failed attempt is retried after one minute.
     #[must_use]
     pub fn new(protocol: Protocol, local_port: NonZeroU16) -> Self {
         Self {
@@ -145,9 +170,7 @@ impl Config {
             lifetime: Duration::from_secs(2 * 60 * 60),
             retry_interval: Duration::from_secs(60),
             description: "port-control-client".to_owned(),
-            pcp: true,
-            nat_pmp: true,
-            upnp: true,
+            methods: Self::DEFAULT_METHODS.to_vec(),
             #[cfg(feature = "restart-announcements")]
             restart_announcements: false,
         }
@@ -184,24 +207,21 @@ impl Config {
         self
     }
 
-    /// Whether to try PCP.
+    /// The protocols to try, in this order. Protocols not in the list are
+    /// off, and a protocol listed twice counts once, at its first place. For
+    /// example, `[Method::Upnp, Method::Pcp]` tries UPnP first, then PCP,
+    /// and never NAT-PMP. An empty list turns every protocol off.
+    ///
+    /// A held mapping is renewed with the protocol that granted it, whatever
+    /// the order.
     #[must_use]
-    pub fn pcp(mut self, on: bool) -> Self {
-        self.pcp = on;
-        self
-    }
-
-    /// Whether to try NAT-PMP.
-    #[must_use]
-    pub fn nat_pmp(mut self, on: bool) -> Self {
-        self.nat_pmp = on;
-        self
-    }
-
-    /// Whether to try UPnP.
-    #[must_use]
-    pub fn upnp(mut self, on: bool) -> Self {
-        self.upnp = on;
+    pub fn methods(mut self, methods: impl IntoIterator<Item = Method>) -> Self {
+        self.methods.clear();
+        for method in methods {
+            if !self.methods.contains(&method) {
+                self.methods.push(method);
+            }
+        }
         self
     }
 
@@ -209,7 +229,8 @@ impl Config {
     /// routers. After a restart, the router has lost the mapping, and the
     /// task renews it within a few seconds, not at the next renewal. The
     /// task listens on UDP port 5350, which other programs on the host can
-    /// share. Off by default. Needs the `restart-announcements` feature.
+    /// share. Off by default. Needs the `restart-announcements` feature,
+    /// and does nothing without the `pcp` and `nat-pmp` features.
     #[cfg(feature = "restart-announcements")]
     #[must_use]
     pub fn restart_announcements(mut self, on: bool) -> Self {
@@ -315,13 +336,15 @@ impl PortMapping {
 
 /// A random number from 0 to 1. Without the operating system's random
 /// source, 0.5.
+#[cfg(feature = "pcp")]
 fn random_fraction() -> f64 {
     random::<1>().map_or(0.5, |[b]| f64::from(b) / 255.0)
 }
 
 /// `N` random bytes from the operating system.
-fn random<const N: usize>() -> Result<[u8; N]> {
+#[cfg(any(feature = "pcp", feature = "upnp"))]
+fn random<const N: usize>() -> error::Result<[u8; N]> {
     let mut bytes = [0; N];
-    getrandom::fill(&mut bytes).map_err(|e| Failure::Io(std::io::Error::other(e)))?;
+    getrandom::fill(&mut bytes).map_err(|e| error::Failure::Io(std::io::Error::other(e)))?;
     Ok(bytes)
 }

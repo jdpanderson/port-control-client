@@ -112,6 +112,8 @@ pub enum ErrorKind {
     NetworkChanged,
     /// The configuration turns every protocol off.
     NoProtocol,
+    /// The crate was built without the protocol's feature.
+    NotBuilt,
 }
 
 /// Why a request to the router failed, inside the crate. [`Failure::cause`]
@@ -121,9 +123,11 @@ pub(crate) enum Failure {
     Io(io::Error),
     Timeout,
     NoDefaultGateway(io::Error),
+    #[cfg(feature = "upnp")]
     NoUpnpGateway,
     /// The reply does not follow the protocol, for this reason.
     BadReply(&'static str),
+    #[cfg(feature = "upnp")]
     HttpStatus(u16),
     Refused {
         code: u16,
@@ -133,6 +137,8 @@ pub(crate) enum Failure {
     },
     NetworkChanged,
     NoProtocol,
+    #[cfg(not(all(feature = "pcp", feature = "nat-pmp", feature = "upnp")))]
+    NotBuilt,
 }
 
 impl Failure {
@@ -154,8 +160,10 @@ impl Failure {
             Failure::Io(e) => ErrorKind::Io(e.kind()),
             Failure::Timeout => ErrorKind::Timeout,
             Failure::NoDefaultGateway(_) => ErrorKind::NoDefaultGateway,
+            #[cfg(feature = "upnp")]
             Failure::NoUpnpGateway => ErrorKind::NoUpnpGateway,
             Failure::BadReply(_) => ErrorKind::BadReply,
+            #[cfg(feature = "upnp")]
             Failure::HttpStatus(status) => ErrorKind::HttpStatus(*status),
             Failure::Refused {
                 code, temporary, ..
@@ -165,6 +173,8 @@ impl Failure {
             },
             Failure::NetworkChanged => ErrorKind::NetworkChanged,
             Failure::NoProtocol => ErrorKind::NoProtocol,
+            #[cfg(not(all(feature = "pcp", feature = "nat-pmp", feature = "upnp")))]
+            Failure::NotBuilt => ErrorKind::NotBuilt,
         };
         Cause {
             method,
@@ -180,12 +190,16 @@ impl fmt::Display for Failure {
             Failure::Io(e) => write!(f, "{e}"),
             Failure::Timeout => f.write_str("no reply in time"),
             Failure::NoDefaultGateway(e) => write!(f, "no default gateway: {e}"),
+            #[cfg(feature = "upnp")]
             Failure::NoUpnpGateway => f.write_str("no UPnP gateway answered"),
             Failure::BadReply(why) => write!(f, "bad reply: {why}"),
+            #[cfg(feature = "upnp")]
             Failure::HttpStatus(status) => write!(f, "HTTP status {status}"),
             Failure::Refused { code, name, .. } => write!(f, "error {code} ({name})"),
             Failure::NetworkChanged => f.write_str("the local address or gateway changed"),
             Failure::NoProtocol => f.write_str("PCP, NAT-PMP and UPnP are all off"),
+            #[cfg(not(all(feature = "pcp", feature = "nat-pmp", feature = "upnp")))]
+            Failure::NotBuilt => f.write_str("not built: its feature is off"),
         }
     }
 }

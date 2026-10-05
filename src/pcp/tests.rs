@@ -147,7 +147,7 @@ fn bad_replies() {
 
 #[test]
 fn grants_that_are_not_mappings() {
-    let server = SocketAddrV4::new(Ipv4Addr::LOCALHOST, PORT);
+    let server = SocketAddrV4::new(Ipv4Addr::LOCALHOST, crate::udp::PMP_PORT);
     let lease = |lifetime, external| {
         let granted = Granted {
             lifetime,

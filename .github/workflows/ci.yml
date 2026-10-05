@@ -60,6 +60,36 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --no-deps --all-features
 
+  # Each set of protocol features, with and without restart announcements:
+  # no warnings, and the tests pass.
+  features:
+    name: Feature sets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select stable Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup component add clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Lint and test
+        run: |
+          for set in pcp nat-pmp upnp pcp,nat-pmp pcp,upnp nat-pmp,upnp; do
+            for features in "$set" "$set,restart-announcements"; do
+              echo "::group::$features"
+              cargo clippy --locked --no-default-features --features "$features" --all-targets -- -D warnings
+              cargo test --locked --no-default-features --features "$features"
+              echo "::endgroup::"
+            done
+          done
+
   # The oldest Rust in `rust-version` must still build everything.
   msrv:
     name: Minimum Rust version
@@ -136,7 +166,7 @@ jobs:
       - name: Measure
         run: >
           cargo llvm-cov --locked --all-features --summary-only
-          --ignore-filename-regex '(fake|/tests)\.rs$'
+          --ignore-filename-regex '(fake|responder|/tests)\.rs$'
           --fail-under-lines 99
 
   # Each parser of data from the network runs under libFuzzer for a short

@@ -49,7 +49,9 @@ const MAX_MESSAGE: usize = 1100;
 /// The protocol of a server's announcements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
+    #[cfg(feature = "pcp")]
     Pcp,
+    #[cfg(feature = "nat-pmp")]
     NatPmp,
 }
 
@@ -78,6 +80,7 @@ impl Epoch {
         match kind {
             // RFC 6887, section 8.5: time goes back by more than a second,
             // or the two clocks move at rates that are too different.
+            #[cfg(feature = "pcp")]
             Kind::Pcp => {
                 if next < prev - 1 {
                     return true;
@@ -87,6 +90,7 @@ impl Epoch {
             }
             // RFC 6886, section 3.6: more than 2 seconds behind 7/8 of the
             // time that passed.
+            #[cfg(feature = "nat-pmp")]
             Kind::NatPmp => next + 2 < prev.saturating_add(client.saturating_mul(7) / 8),
         }
     }
@@ -102,8 +106,10 @@ pub(crate) fn parse(b: &[u8], kind: Kind) -> Option<u32> {
     match kind {
         // A PCP ANNOUNCE response (version 2, the R bit, opcode 0) with
         // result SUCCESS.
+        #[cfg(feature = "pcp")]
         Kind::Pcp if b.len() >= 24 && b[..2] == [2, 0x80] && b[3] == 0 => epoch(8),
         // A NAT-PMP external address response with result 0.
+        #[cfg(feature = "nat-pmp")]
         Kind::NatPmp if b.len() >= 12 && b[..4] == [0, 128, 0, 0] => epoch(4),
         _ => None,
     }
@@ -154,8 +160,8 @@ impl Listener {
     }
 }
 
-#[cfg(fuzzing)]
+#[cfg(all(fuzzing, feature = "pcp", feature = "nat-pmp"))]
 pub(crate) mod fuzz;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "pcp", feature = "nat-pmp"))]
 mod tests;

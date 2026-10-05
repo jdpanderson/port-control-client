@@ -29,10 +29,14 @@ fn kinds() {
             ErrorKind::Io(io::ErrorKind::ConnectionRefused),
         ),
         (Failure::NoDefaultGateway(io), ErrorKind::NoDefaultGateway),
+        #[cfg(feature = "upnp")]
         (Failure::NoUpnpGateway, ErrorKind::NoUpnpGateway),
         (Failure::BadReply("x"), ErrorKind::BadReply),
+        #[cfg(feature = "upnp")]
         (Failure::HttpStatus(404), ErrorKind::HttpStatus(404)),
         (Failure::NetworkChanged, ErrorKind::NetworkChanged),
+        #[cfg(not(all(feature = "pcp", feature = "nat-pmp", feature = "upnp")))]
+        (Failure::NotBuilt, ErrorKind::NotBuilt),
     ];
     for (failure, kind) in cases {
         assert_eq!(failure.cause(None).kind(), kind, "{failure}");

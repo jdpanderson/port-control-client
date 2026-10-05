@@ -1,6 +1,8 @@
 use super::*;
-use crate::fake::responder;
+#[cfg(any(feature = "pcp", feature = "nat-pmp"))]
+use crate::responder::responder;
 
+#[cfg(any(feature = "pcp", feature = "nat-pmp"))]
 #[tokio::test]
 async fn exchange_skips_other_datagrams() {
     let (server, _task) = responder(|_| vec![b"other".to_vec(), b"reply".to_vec()]).await;
@@ -15,6 +17,7 @@ async fn exchange_skips_other_datagrams() {
     assert_eq!(reply, b"reply");
 }
 
+#[cfg(any(feature = "pcp", feature = "nat-pmp"))]
 #[tokio::test]
 async fn exchange_times_out() {
     let (server, _task) = responder(|_| Vec::new()).await;

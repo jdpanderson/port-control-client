@@ -9,17 +9,26 @@ use tokio::{
 };
 use tracing::{debug, info};
 
+#[cfg(all(
+    feature = "restart-announcements",
+    any(feature = "pcp", feature = "nat-pmp")
+))]
+use crate::announce::{self, Epoch, Kind, Listener};
+#[cfg(feature = "nat-pmp")]
+use crate::nat_pmp;
+#[cfg(all(feature = "restart-announcements", feature = "pcp"))]
+use crate::random_fraction;
+#[cfg(any(feature = "pcp", feature = "nat-pmp"))]
+use crate::udp;
+#[cfg(feature = "upnp")]
+use crate::upnp::{self, ssdp};
 use crate::{
     Config, Mapping, Method,
     error::{Error, Failure, Result},
-    gateway, nat_pmp, pcp, random,
-    upnp::{self, ssdp},
+    gateway,
 };
-#[cfg(feature = "restart-announcements")]
-use crate::{
-    announce::{self, Epoch, Kind, Listener},
-    random_fraction,
-};
+#[cfg(feature = "pcp")]
+use crate::{pcp, random};
 
 /// The shortest wait between two steps, so that a router that grants very
 /// short lifetimes does not keep the task busy.
@@ -27,6 +36,7 @@ const MIN_WAIT: Duration = Duration::from_secs(1);
 /// How long `stop` waits for the router to release the mapping.
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long to wait for SSDP replies.
+#[cfg(feature = "upnp")]
 const SSDP_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
@@ -40,12 +50,19 @@ pub(crate) enum Command {
 pub(crate) struct Targets {
     pub(crate) gateway: Gateway,
     /// The PCP and NAT-PMP server port.
+    #[cfg(any(feature = "pcp", feature = "nat-pmp"))]
     pub(crate) pmp_port: u16,
+    #[cfg(feature = "upnp")]
     pub(crate) ssdp: SocketAddrV4,
+    #[cfg(feature = "upnp")]
     pub(crate) ssdp_wait: Duration,
     /// How long PCP waits for a reply after each send.
+    #[cfg(feature = "pcp")]
     pub(crate) pcp_wait: Duration,
-    #[cfg(feature = "restart-announcements")]
+    #[cfg(all(
+        feature = "restart-announcements",
+        any(feature = "pcp", feature = "nat-pmp")
+    ))]
     pub(crate) announce: announce::Targets,
 }
 
@@ -54,13 +71,13 @@ pub(crate) struct Targets {
 pub(crate) enum Gateway {
     /// Look up the system's default gateway each time.
     System,
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "pcp", feature = "nat-pmp")))]
     Fixed(Ipv4Addr),
     /// A gateway that a test can change.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "pcp", feature = "nat-pmp", feature = "upnp"))]
     Changing(std::sync::Arc<std::sync::atomic::AtomicU32>),
     /// A system with no default gateway.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "pcp", feature = "nat-pmp", feature = "upnp"))]
     Missing,
 }
 
@@ -68,11 +85,18 @@ impl Targets {
     pub(crate) fn system() -> Self {
         Self {
             gateway: Gateway::System,
-            pmp_port: pcp::PORT,
+            #[cfg(any(feature = "pcp", feature = "nat-pmp"))]
+            pmp_port: udp::PMP_PORT,
+            #[cfg(feature = "upnp")]
             ssdp: ssdp::MULTICAST,
+            #[cfg(feature = "upnp")]
             ssdp_wait: SSDP_WAIT,
+            #[cfg(feature = "pcp")]
             pcp_wait: pcp::WAIT,
-            #[cfg(feature = "restart-announcements")]
+            #[cfg(all(
+                feature = "restart-announcements",
+                any(feature = "pcp", feature = "nat-pmp")
+            ))]
             announce: announce::Targets::system(),
         }
     }
@@ -80,13 +104,13 @@ impl Targets {
     fn gateway(&self) -> Result<Ipv4Addr> {
         match &self.gateway {
             Gateway::System => gateway::default_gateway().map_err(Failure::NoDefaultGateway),
-            #[cfg(test)]
+            #[cfg(all(test, any(feature = "pcp", feature = "nat-pmp")))]
             Gateway::Fixed(gateway) => Ok(*gateway),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "pcp", feature = "nat-pmp", feature = "upnp"))]
             Gateway::Changing(gateway) => {
                 Ok(gateway.load(std::sync::atomic::Ordering::SeqCst).into())
             }
-            #[cfg(test)]
+            #[cfg(all(test, feature = "pcp", feature = "nat-pmp", feature = "upnp"))]
             Gateway::Missing => Err(Failure::NoDefaultGateway(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "no IPv4 default route",
@@ -97,16 +121,22 @@ impl Targets {
 
 #[derive(Clone, Debug)]
 enum Lease {
+    #[cfg(feature = "pcp")]
     Pcp(pcp::Lease),
+    #[cfg(feature = "nat-pmp")]
     NatPmp(nat_pmp::Lease),
+    #[cfg(feature = "upnp")]
     Upnp(upnp::Lease),
 }
 
 impl Lease {
     fn mapping(&self) -> Mapping {
         let (external, method) = match self {
+            #[cfg(feature = "pcp")]
             Lease::Pcp(l) => (l.external, Method::Pcp),
+            #[cfg(feature = "nat-pmp")]
             Lease::NatPmp(l) => (l.external, Method::NatPmp),
+            #[cfg(feature = "upnp")]
             Lease::Upnp(l) => (l.external, Method::Upnp),
         };
         Mapping { external, method }
@@ -114,22 +144,40 @@ impl Lease {
 
     /// For PCP and NAT-PMP leases: the server, our address, the kind of
     /// restart announcements, and the server's epoch.
-    #[cfg(feature = "restart-announcements")]
+    #[cfg(all(
+        feature = "restart-announcements",
+        any(feature = "pcp", feature = "nat-pmp")
+    ))]
     fn announcer(&mut self) -> Option<(SocketAddrV4, Ipv4Addr, Kind, &mut Epoch)> {
         match self {
+            #[cfg(feature = "pcp")]
             Lease::Pcp(l) => Some((l.server, l.local_ip, Kind::Pcp, &mut l.epoch)),
+            #[cfg(feature = "nat-pmp")]
             Lease::NatPmp(l) => Some((l.server, l.local_ip, Kind::NatPmp, &mut l.epoch)),
+            #[cfg(feature = "upnp")]
             Lease::Upnp(_) => None,
         }
     }
 
-    /// The granted lifetime. UPnP gateways do not say what they grant, so
-    /// for UPnP it is the lifetime we asked for.
-    fn lifetime(&self, config: &Config) -> Duration {
+    /// The granted lifetime. `None` for UPnP: gateways do not say what
+    /// they grant.
+    fn lifetime(&self) -> Option<Duration> {
         match self {
-            Lease::Pcp(l) => l.lifetime,
-            Lease::NatPmp(l) => l.lifetime,
-            Lease::Upnp(_) => Duration::from_secs(config.lifetime_secs().into()),
+            #[cfg(feature = "pcp")]
+            Lease::Pcp(l) => Some(l.lifetime),
+            #[cfg(feature = "nat-pmp")]
+            Lease::NatPmp(l) => Some(l.lifetime),
+            #[cfg(feature = "upnp")]
+            Lease::Upnp(_) => None,
+        }
+    }
+
+    #[cfg(feature = "upnp")]
+    fn upnp(&self) -> Option<&upnp::Lease> {
+        match self {
+            Lease::Upnp(l) => Some(l),
+            #[cfg(any(feature = "pcp", feature = "nat-pmp"))]
+            _ => None,
         }
     }
 }
@@ -152,7 +200,7 @@ pub(crate) async fn run(
     errors: watch::Sender<Option<Error>>,
 ) {
     let mut held: Option<Held> = None;
-    let mut nonce: Option<pcp::Nonce> = None;
+    let mut nonce = Nonce::default();
     let mut next = Instant::now();
     // Announcements do not bring steps closer together than `MIN_WAIT`.
     let mut last_step = Instant::now();
@@ -225,14 +273,20 @@ pub(crate) async fn run(
 
 /// Listens for restart announcements while the task holds a PCP or NAT-PMP
 /// lease, if the config turns this on.
-#[cfg(feature = "restart-announcements")]
+#[cfg(all(
+    feature = "restart-announcements",
+    any(feature = "pcp", feature = "nat-pmp")
+))]
 #[derive(Debug)]
 struct Restarts {
     on: bool,
     listener: Option<Listener>,
 }
 
-#[cfg(feature = "restart-announcements")]
+#[cfg(all(
+    feature = "restart-announcements",
+    any(feature = "pcp", feature = "nat-pmp")
+))]
 impl Restarts {
     fn new(config: &Config) -> Self {
         Self {
@@ -281,11 +335,17 @@ impl Restarts {
 
 /// Without the `restart-announcements` feature, the task does not listen
 /// for restarts.
-#[cfg(not(feature = "restart-announcements"))]
+#[cfg(not(all(
+    feature = "restart-announcements",
+    any(feature = "pcp", feature = "nat-pmp")
+)))]
 #[derive(Debug)]
 struct Restarts;
 
-#[cfg(not(feature = "restart-announcements"))]
+#[cfg(not(all(
+    feature = "restart-announcements",
+    any(feature = "pcp", feature = "nat-pmp")
+)))]
 impl Restarts {
     fn new(_: &Config) -> Self {
         Self
@@ -300,7 +360,10 @@ impl Restarts {
 
 /// Waits for an announcement from `server` that shows a restart, and
 /// returns how long to wait before the renewal.
-#[cfg(feature = "restart-announcements")]
+#[cfg(all(
+    feature = "restart-announcements",
+    any(feature = "pcp", feature = "nat-pmp")
+))]
 async fn restart_delay(
     listener: &Listener,
     server: SocketAddrV4,
@@ -320,12 +383,24 @@ async fn restart_delay(
 /// and keeps it. After a restart, it returns how long to wait before the
 /// renewal: PCP waits a random time up to `delay` (RFC 6887, section
 /// 14.1.3), and NAT-PMP renews now (RFC 6886, section 3.2.1).
-#[cfg(feature = "restart-announcements")]
+#[cfg(all(
+    feature = "restart-announcements",
+    any(feature = "pcp", feature = "nat-pmp")
+))]
+#[cfg_attr(
+    not(feature = "pcp"),
+    expect(unused_variables, reason = "the delay is for PCP")
+)]
 fn restarted(epoch: &mut Epoch, kind: Kind, next: u32, delay: Duration) -> Option<Duration> {
     let lost = epoch.lost(kind, next, Instant::now());
     *epoch = Epoch::new(next);
-    lost.then(|| match kind {
+    if !lost {
+        return None;
+    }
+    Some(match kind {
+        #[cfg(feature = "pcp")]
         Kind::Pcp => delay.mul_f64(random_fraction()),
+        #[cfg(feature = "nat-pmp")]
         Kind::NatPmp => Duration::ZERO,
     })
 }
@@ -343,7 +418,7 @@ async fn step(
     config: &Config,
     targets: &Targets,
     held: Option<&Held>,
-    nonce: &mut Option<pcp::Nonce>,
+    nonce: &mut Nonce,
 ) -> Outcome {
     let Some(old) = held else {
         return match acquire(config, targets, nonce).await {
@@ -378,7 +453,8 @@ async fn step(
     // Ask for a new mapping now.
     if failure.mapping_gone() || left.is_zero() {
         info!("lost the port mapping: {error}");
-        if let Lease::Upnp(lease) = &old.lease {
+        #[cfg(feature = "upnp")]
+        if let Some(lease) = old.lease.upnp() {
             if upnp::delete_on_loss(&failure) {
                 discard(lease).await;
             }
@@ -400,6 +476,7 @@ async fn step(
 
 /// Deletes a UPnP lease that the task no longer renews, if the gateway
 /// still answers.
+#[cfg(feature = "upnp")]
 async fn discard(lease: &upnp::Lease) {
     let result = timeout(RELEASE_TIMEOUT, upnp::release(lease))
         .await
@@ -410,7 +487,10 @@ async fn discard(lease: &upnp::Lease) {
 }
 
 fn hold(config: &Config, lease: Lease) -> Outcome {
-    let lifetime = lease.lifetime(config);
+    // For UPnP, the lifetime we asked for.
+    let lifetime = lease
+        .lifetime()
+        .unwrap_or_else(|| Duration::from_secs(config.lifetime_secs().into()));
     let expires = Instant::now() + lifetime;
     Outcome {
         held: Some(Held { lease, expires }),
@@ -419,50 +499,59 @@ fn hold(config: &Config, lease: Lease) -> Outcome {
     }
 }
 
-/// Tries PCP, then NAT-PMP, then UPnP. The error has a cause for each one
-/// that failed.
-async fn acquire(
-    config: &Config,
-    targets: &Targets,
-    nonce: &mut Option<pcp::Nonce>,
-) -> Result<Lease, Error> {
-    let port = config.local_port.get();
-    let lifetime = config.lifetime_secs();
+/// Tries each protocol of the config, in order. The error has a cause for
+/// each one that failed.
+#[cfg_attr(
+    not(feature = "pcp"),
+    expect(unused_variables, reason = "the nonce is for PCP")
+)]
+async fn acquire(config: &Config, targets: &Targets, nonce: &mut Nonce) -> Result<Lease, Error> {
     let mut causes = Vec::new();
-    let gateway = targets.gateway();
-    // UPnP finds its gateway by search; the default gateway only ends the
-    // search early.
-    let upnp_gateway = gateway.as_ref().ok().copied();
-    if config.pcp || config.nat_pmp {
-        match gateway {
-            Ok(gateway) => {
-                let server = SocketAddrV4::new(gateway, targets.pmp_port);
-                if config.pcp {
-                    match pcp_map(config, targets, server, nonce).await {
-                        Ok(lease) => return Ok(Lease::Pcp(lease)),
-                        Err(e) => causes.push(e.cause(Some(Method::Pcp))),
-                    }
-                }
-                if config.nat_pmp {
-                    match nat_pmp::map(server, config.protocol, port, lifetime).await {
-                        Ok(lease) => return Ok(Lease::NatPmp(lease)),
-                        Err(e) => causes.push(e.cause(Some(Method::NatPmp))),
-                    }
-                }
+    // Looked up when a protocol first needs it.
+    let mut gateway = None;
+    for &method in &config.methods {
+        let result = match method {
+            #[cfg(feature = "pcp")]
+            Method::Pcp => {
+                let Some(server) = pmp_server(targets, &mut gateway, &mut causes) else {
+                    continue;
+                };
+                pcp_map(config, targets, server, nonce)
+                    .await
+                    .map(Lease::Pcp)
             }
-            Err(e) => causes.push(e.cause(None)),
-        }
-    }
-    if config.upnp {
-        let search = upnp::Search {
-            dest: targets.ssdp,
-            gateway: upnp_gateway,
-            wait: targets.ssdp_wait,
+            #[cfg(feature = "nat-pmp")]
+            Method::NatPmp => {
+                let Some(server) = pmp_server(targets, &mut gateway, &mut causes) else {
+                    continue;
+                };
+                let (port, lifetime) = (config.local_port.get(), config.lifetime_secs());
+                nat_pmp::map(server, config.protocol, port, lifetime)
+                    .await
+                    .map(Lease::NatPmp)
+            }
+            // UPnP finds its gateway by search; the default gateway only
+            // ends the search early.
+            #[cfg(feature = "upnp")]
+            Method::Upnp => {
+                let gateway = gateway.get_or_insert_with(|| targets.gateway());
+                let search = upnp::Search {
+                    dest: targets.ssdp,
+                    gateway: gateway.as_ref().ok().copied(),
+                    wait: targets.ssdp_wait,
+                };
+                let (port, lifetime) = (config.local_port.get(), config.lifetime_secs());
+                let description = &config.description;
+                upnp::map(&search, config.protocol, port, lifetime, description)
+                    .await
+                    .map(Lease::Upnp)
+            }
+            #[cfg(not(all(feature = "pcp", feature = "nat-pmp", feature = "upnp")))]
+            _ => Err(Failure::NotBuilt),
         };
-        let description = &config.description;
-        match upnp::map(&search, config.protocol, port, lifetime, description).await {
-            Ok(lease) => return Ok(Lease::Upnp(lease)),
-            Err(e) => causes.push(e.cause(Some(Method::Upnp))),
+        match result {
+            Ok(lease) => return Ok(lease),
+            Err(e) => causes.push(e.cause(Some(method))),
         }
     }
     if causes.is_empty() {
@@ -471,14 +560,36 @@ async fn acquire(
     Err(Error::new(causes))
 }
 
+/// The PCP and NAT-PMP server on the default `gateway`, which it looks up
+/// on first use. Without a default gateway, `None`. PCP and NAT-PMP then
+/// share one cause in `causes`.
+#[cfg(any(feature = "pcp", feature = "nat-pmp"))]
+fn pmp_server(
+    targets: &Targets,
+    gateway: &mut Option<Result<Ipv4Addr>>,
+    causes: &mut Vec<crate::Cause>,
+) -> Option<SocketAddrV4> {
+    match gateway.get_or_insert_with(|| targets.gateway()) {
+        Ok(gateway) => Some(SocketAddrV4::new(*gateway, targets.pmp_port)),
+        Err(e) => {
+            let kind = crate::ErrorKind::NoDefaultGateway;
+            if !causes.iter().any(|c| c.kind() == kind) {
+                causes.push(e.cause(None));
+            }
+            None
+        }
+    }
+}
+
 /// Asks `server` for a PCP mapping, with the task's nonce.
+#[cfg(feature = "pcp")]
 async fn pcp_map(
     config: &Config,
     targets: &Targets,
     server: SocketAddrV4,
-    nonce: &mut Option<pcp::Nonce>,
+    nonce: &mut Nonce,
 ) -> Result<pcp::Lease> {
-    let nonce = pcp_nonce(nonce)?;
+    let nonce = nonce.get()?;
     let (port, lifetime) = (config.local_port.get(), config.lifetime_secs());
     pcp::map(
         server,
@@ -493,29 +604,44 @@ async fn pcp_map(
 
 /// The task's PCP nonce, made on first use. Every request of the task uses
 /// it; see [`pcp::map`].
-fn pcp_nonce(nonce: &mut Option<pcp::Nonce>) -> Result<pcp::Nonce> {
-    if let Some(nonce) = nonce {
-        return Ok(*nonce);
+#[derive(Debug, Default)]
+struct Nonce(#[cfg(feature = "pcp")] Option<pcp::Nonce>);
+
+#[cfg(feature = "pcp")]
+impl Nonce {
+    fn get(&mut self) -> Result<pcp::Nonce> {
+        if let Some(nonce) = self.0 {
+            return Ok(nonce);
+        }
+        Ok(*self.0.insert(random()?))
     }
-    Ok(*nonce.insert(random()?))
 }
 
+#[cfg_attr(
+    not(any(feature = "pcp", feature = "nat-pmp")),
+    expect(unused_variables, reason = "only PCP and NAT-PMP use the targets")
+)]
 async fn renew(config: &Config, targets: &Targets, lease: &Lease) -> Result<Lease> {
-    let lifetime = config.lifetime_secs();
     match lease {
+        #[cfg(feature = "pcp")]
         Lease::Pcp(l) => {
             same_gateway(targets, l.server)?;
+            let lifetime = config.lifetime_secs();
             Ok(Lease::Pcp(pcp::renew(l, lifetime, targets.pcp_wait).await?))
         }
+        #[cfg(feature = "nat-pmp")]
         Lease::NatPmp(l) => {
             same_gateway(targets, l.server)?;
+            let lifetime = config.lifetime_secs();
             Ok(Lease::NatPmp(nat_pmp::renew(l, lifetime).await?))
         }
+        #[cfg(feature = "upnp")]
         Lease::Upnp(l) => Ok(Lease::Upnp(upnp::renew(l, &config.description).await?)),
     }
 }
 
 /// A new default gateway means a new network: the old mapping is of no use.
+#[cfg(any(feature = "pcp", feature = "nat-pmp"))]
 fn same_gateway(targets: &Targets, server: SocketAddrV4) -> Result<()> {
     if targets.gateway()? == *server.ip() {
         Ok(())
@@ -550,8 +676,11 @@ async fn finish(
         let mapping = held.lease.mapping();
         let release = async {
             match &held.lease {
+                #[cfg(feature = "pcp")]
                 Lease::Pcp(l) => pcp::release(l).await,
+                #[cfg(feature = "nat-pmp")]
                 Lease::NatPmp(l) => nat_pmp::release(l).await,
+                #[cfg(feature = "upnp")]
                 Lease::Upnp(l) => upnp::release(l).await,
             }
         };
@@ -575,5 +704,5 @@ async fn finish(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "pcp", feature = "nat-pmp")))]
 mod tests;

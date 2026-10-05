@@ -7,8 +7,18 @@
 
 A router port mapping client for [Tokio](https://tokio.rs). It asks the
 router to forward a port to this host, renews the mapping, and removes it
-when you stop. It tries PCP ([RFC 6887]), then NAT-PMP ([RFC 6886]), then
-UPnP IGD (versions 1 and 2).
+when you stop. It speaks PCP ([RFC 6887]), UPnP IGD (versions 1 and 2)
+and NAT-PMP ([RFC 6886]). By default it tries PCP, then UPnP. NAT-PMP is
+off by default, because few routers have it. To change the order, or to
+choose the protocols, use `Config::methods`:
+
+```rust,no_run
+# use std::num::NonZeroU16;
+# use port_control_client::{Config, Method, Protocol};
+# let port = NonZeroU16::new(51820).unwrap();
+let config = Config::new(Protocol::Udp, port)
+    .methods([Method::Upnp, Method::Pcp, Method::NatPmp]);
+```
 
 ```rust,no_run
 use std::{num::NonZeroU16, time::Duration};
@@ -40,8 +50,8 @@ To test it on your network: `cargo run --example map -- udp 51820`.
 - A background task gets the mapping and renews it at half its lifetime.
   If no router grants a mapping, the task tries again after the retry
   interval (default: one minute). `refresh()` tries again now.
-- PCP sends twice, 3 seconds apart, and NAT-PMP three times in 1.75
-  seconds. Then the task tries the next protocol.
+- PCP sends twice, 3 seconds apart, NAT-PMP three times in 1.75 seconds,
+  and UPnP searches for 2 seconds. Then the task tries the next protocol.
 - Optional: with the `restart-announcements` feature and
   `Config::restart_announcements(true)`, the task listens for restart
   announcements from PCP and NAT-PMP routers. After a restart, it renews
@@ -70,11 +80,31 @@ To test it on your network: `cargo run --example map -- udp 51820`.
 - UPnP uses a gateway only if its URLs are on the host that answered the
   SSDP search.
 
+## Features
+
+| Feature                 | Default | What it adds                                 |
+| ----------------------- | ------- | -------------------------------------------- |
+| `pcp`                   | yes     | PCP                                          |
+| `upnp`                  | yes     | UPnP IGD                                     |
+| `nat-pmp`               | yes     | NAT-PMP, which `Config::methods` must list   |
+| `restart-announcements` | no      | `Config::restart_announcements`              |
+
+A build needs at least one protocol. To leave protocols out, turn off the
+default features and list the ones you want:
+
+```toml
+port-control-client = { version = "0.2", default-features = false, features = ["upnp"] }
+```
+
+`Config::DEFAULT_METHODS` holds only the protocols that are built. A
+protocol that `Config::methods` lists but that is not built fails with
+`ErrorKind::NotBuilt`.
+
 ## Dependencies
 
-`tokio`, `tracing`, `httparse` and `roxmltree` (UPnP), `getrandom` (PCP
-nonces and random ports), `libc` on macOS (the routing table), and
-`socket2` with the `restart-announcements` feature.
+`tokio`, `tracing`, `libc` on macOS (the routing table), `httparse` and
+`roxmltree` with `upnp`, `getrandom` with `pcp` or `upnp` (PCP nonces and
+random ports), and `socket2` with `restart-announcements`.
 
 ## Security
 

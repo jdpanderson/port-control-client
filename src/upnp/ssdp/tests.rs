@@ -1,7 +1,7 @@
 use super::*;
 use tokio::task::JoinHandle;
 
-use crate::fake::responder;
+use crate::responder::responder;
 
 const REPLY: &[u8] = b"HTTP/1.1 200 OK\r\n\
         CACHE-CONTROL: max-age=120\r\n\

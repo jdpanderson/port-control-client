@@ -17,15 +17,22 @@ include = ["/src", "/tests", "/examples", "/README.md", "/CHANGELOG.md", "/LICEN
 all-features = true
 
 [features]
+default = ["pcp", "upnp", "nat-pmp"]
+# The protocols. A build needs at least one. `Config::methods` chooses which
+# of the built ones to try, and in what order.
+pcp = ["dep:getrandom"]
+nat-pmp = []
+upnp = ["dep:getrandom", "dep:httparse", "dep:roxmltree"]
 # Listen for restart announcements from PCP and NAT-PMP routers; see
-# `Config::restart_announcements`.
+# `Config::restart_announcements`. Without `pcp` or `nat-pmp`, it does
+# nothing.
 restart-announcements = ["dep:socket2"]
 
 # The lowest versions are tested in CI (the minimal-versions job).
 [dependencies]
-getrandom = "0.4"
-httparse = "1.10"
-roxmltree = { version = "0.21", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", optional = true }
+httparse = { version = "1.10", optional = true }
+roxmltree = { version = "0.21", default-features = false, features = ["std"], optional = true }
 # Socket options for the restart announcement port. Tokio uses it too.
 socket2 = { version = "0.6", features = ["all"], optional = true }
 tokio = { version = "1.38", features = ["io-util", "macros", "net", "rt", "sync", "time"] }

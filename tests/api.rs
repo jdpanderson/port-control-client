@@ -13,10 +13,7 @@ fn port() -> NonZeroU16 {
 
 /// A config that tries no protocol, so nothing goes to the network.
 fn offline() -> Config {
-    Config::new(Protocol::Udp, port())
-        .pcp(false)
-        .nat_pmp(false)
-        .upnp(false)
+    Config::new(Protocol::Udp, port()).methods([])
 }
 
 fn thread_safe<T: Send + Sync + Unpin + 'static>() {}
@@ -62,6 +59,32 @@ fn config_builder() {
     assert_ne!(changed, default);
 }
 
+#[test]
+fn method_order() {
+    let default = Config::new(Protocol::Udp, port());
+    let built: Vec<_> = [
+        #[cfg(feature = "pcp")]
+        Method::Pcp,
+        #[cfg(feature = "upnp")]
+        Method::Upnp,
+    ]
+    .into();
+    assert_eq!(Config::DEFAULT_METHODS, built);
+    let upnp_first =
+        default
+            .clone()
+            .methods([Method::Upnp, Method::Pcp, Method::Upnp, Method::NatPmp]);
+    assert_ne!(upnp_first, default);
+    assert_eq!(
+        upnp_first,
+        default
+            .clone()
+            .methods([Method::Upnp, Method::Pcp, Method::NatPmp])
+    );
+    let defaults = Config::DEFAULT_METHODS.iter().copied();
+    assert_eq!(default.clone().methods(defaults), default);
+}
+
 #[tokio::test]
 async fn stop_twice() {
     let mapping = PortMapping::start(offline());
@@ -73,18 +96,21 @@ async fn stop_twice() {
     mapping.refresh();
 }
 
+/// The first error of the task. The configs here fail at once.
+async fn first_error(mapping: &PortMapping) -> Error {
+    for _ in 0..100 {
+        if let Some(error) = mapping.last_error() {
+            return error;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no error after one second");
+}
+
 #[tokio::test]
 async fn last_error_says_why() {
     let mapping = PortMapping::start(offline());
-    let mut tries = 0;
-    let error = loop {
-        if let Some(error) = mapping.last_error() {
-            break error;
-        }
-        tries += 1;
-        assert!(tries < 100, "no error after one second");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
+    let error = first_error(&mapping).await;
     let [cause] = error.causes() else {
         panic!("{error:?}");
     };
@@ -101,4 +127,31 @@ async fn stop_can_run_on_another_task() {
     tokio::spawn(async move { mapping.stop().await })
         .await
         .unwrap();
+}
+
+/// A protocol whose feature is off fails without going to the network.
+#[cfg(not(all(feature = "pcp", feature = "nat-pmp", feature = "upnp")))]
+#[tokio::test]
+async fn protocols_not_built() {
+    let not_built = [
+        #[cfg(not(feature = "pcp"))]
+        Method::Pcp,
+        #[cfg(not(feature = "nat-pmp"))]
+        Method::NatPmp,
+        #[cfg(not(feature = "upnp"))]
+        Method::Upnp,
+    ];
+    let mapping = PortMapping::start(offline().methods(not_built));
+    let error = first_error(&mapping).await;
+    let causes: Vec<_> = error
+        .causes()
+        .iter()
+        .map(|c| (c.method(), c.kind()))
+        .collect();
+    let expected: Vec<_> = not_built
+        .iter()
+        .map(|&m| (Some(m), ErrorKind::NotBuilt))
+        .collect();
+    assert_eq!(causes, expected);
+    mapping.stop().await;
 }

@@ -1,17 +1,24 @@
-//! One request and its reply over UDP, for PCP and NAT-PMP.
+//! One request and its reply over UDP, for PCP and NAT-PMP, and the local
+//! address toward a UPnP gateway.
 
 use std::{
     io,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
 };
 
-use tokio::{
-    net::UdpSocket,
-    time::{Duration, Instant, timeout_at},
-};
+use tokio::net::UdpSocket;
+#[cfg(any(feature = "pcp", feature = "nat-pmp"))]
+use tokio::time::{Duration, Instant, timeout_at};
 
-use crate::error::{Failure, Result};
+#[cfg(any(feature = "pcp", feature = "nat-pmp"))]
+use crate::error::Failure;
+use crate::error::Result;
 
+/// The PCP and NAT-PMP server port.
+#[cfg(any(feature = "pcp", feature = "nat-pmp"))]
+pub(crate) const PMP_PORT: u16 = 5351;
+
+#[cfg(any(feature = "pcp", feature = "nat-pmp"))]
 /// How long NAT-PMP waits after each send. RFC 6886 starts at 250 ms and
 /// doubles the wait; we stop after three sends, so a missing server costs
 /// 1.75 s and the next protocol gets its turn.
@@ -21,15 +28,18 @@ pub(crate) const NAT_PMP_WAITS: [Duration; 3] = [
     Duration::from_millis(1000),
 ];
 
+#[cfg(any(feature = "pcp", feature = "nat-pmp"))]
 /// PCP messages are at most 1100 bytes (RFC 6887, section 7).
 const MAX_MESSAGE: usize = 1100;
 
 /// A UDP socket connected to one server.
+#[cfg(any(feature = "pcp", feature = "nat-pmp"))]
 pub(crate) struct Socket {
     socket: UdpSocket,
     local_ip: Ipv4Addr,
 }
 
+#[cfg(any(feature = "pcp", feature = "nat-pmp"))]
 impl Socket {
     /// Only datagrams from `server` arrive on the socket.
     pub(crate) async fn connect(server: SocketAddrV4) -> Result<Self> {
@@ -70,6 +80,7 @@ impl Socket {
     }
 }
 
+#[cfg(feature = "upnp")]
 /// The local address the system would use to send to `peer`. Sends nothing.
 pub(crate) async fn local_ip(peer: SocketAddrV4) -> Result<Ipv4Addr> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;

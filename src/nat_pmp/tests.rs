@@ -1,7 +1,7 @@
 use super::*;
 use tokio::task::JoinHandle;
 
-use crate::fake::responder;
+use crate::responder::responder;
 
 #[test]
 fn request_layout() {

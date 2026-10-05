@@ -14,9 +14,6 @@ use crate::{
     udp::{NAT_PMP_WAITS, Socket},
 };
 
-/// The server port, shared with NAT-PMP.
-pub(crate) const PORT: u16 = 5351;
-
 /// How long to wait for a reply after a send: the initial retransmission
 /// time of RFC 6887, section 8.1.1.
 pub(crate) const WAIT: Duration = Duration::from_secs(3);

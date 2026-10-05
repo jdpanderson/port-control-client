@@ -4,8 +4,8 @@
 
 use std::net::{Ipv4Addr, SocketAddrV4};
 
-use super::{MAP_LEN, PORT, be16, parse_map_response};
-use crate::Protocol;
+use super::{MAP_LEN, be16, parse_map_response};
+use crate::{Protocol, udp::PMP_PORT as PORT};
 
 pub(crate) fn run(data: &[u8]) {
     let mut nonce = [0; 12];
