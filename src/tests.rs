@@ -15,7 +15,7 @@ use tokio::{
 };
 
 use crate::{
-    Config, ErrorKind, Mapping, Method, PortMapping, Protocol,
+    Config, ErrorKind, Mapping, Method, PortMapping, Protocol, Status,
     fake::{EXTERNAL_IP, FakeIgd, FakePmp, GRANTED_PORT, IgdCall, IgdOptions, PmpRequest, Speaks},
     mapper::{Gateway, Targets},
 };
@@ -612,6 +612,47 @@ async fn last_error_while_renewal_fails() {
 }
 
 #[tokio::test]
+async fn status_follows_the_mapping_and_its_errors() {
+    let router = FakePmp::start(Speaks::Pcp).await;
+    let config = config()
+        .lifetime(Duration::from_secs(6))
+        .methods([Method::Pcp, Method::NatPmp]);
+    let mapping = PortMapping::start_with(config, targets(router.port, no_ssdp().await));
+    let granted = granted(&mapping).await;
+    assert_eq!(
+        mapping.status(),
+        Status::Mapped {
+            mapping: granted,
+            error: None
+        }
+    );
+    router.speak(Speaks::Silent);
+    // The renewal at 3 s fails; the mapping stays until 6 s.
+    until("the renewal error", || mapping.last_error().is_some()).await;
+    let Status::Mapped {
+        mapping: held,
+        error: Some(error),
+    } = mapping.status()
+    else {
+        panic!("{:?}", mapping.status());
+    };
+    assert_eq!(held, granted);
+    assert_eq!(error.causes()[0].kind(), ErrorKind::Timeout);
+    // After the expiry, the error of the failed renewals stays.
+    until("the mapping to expire", || mapping.mapping().is_none()).await;
+    assert!(
+        matches!(mapping.status(), Status::Unmapped { error: Some(_) }),
+        "{:?}",
+        mapping.status()
+    );
+    mapping.stop().await;
+    assert!(matches!(
+        mapping.status(),
+        Status::Stopped { error: Some(_) }
+    ));
+}
+
+#[tokio::test]
 async fn last_error_after_a_failed_release() {
     let router = FakePmp::start(Speaks::Pcp).await;
     let mapping = PortMapping::start_with(
@@ -622,6 +663,10 @@ async fn last_error_after_a_failed_release() {
     router.speak(Speaks::Silent);
     mapping.stop().await;
     assert_eq!(causes(&mapping), [(Some(Method::Pcp), ErrorKind::Timeout)]);
+    assert!(matches!(
+        mapping.status(),
+        Status::Stopped { error: Some(_) }
+    ));
 }
 
 #[tokio::test]

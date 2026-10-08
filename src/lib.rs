@@ -134,6 +134,55 @@ pub struct Mapping {
     pub method: Method,
 }
 
+/// What the task has: a mapping or not, and why the last request failed.
+/// See [`PortMapping::status`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Status {
+    /// No mapping. `error` says why the last attempt failed: to get the
+    /// mapping, or to renew one that then expired. `None` before the first
+    /// attempt ends.
+    Unmapped {
+        /// Why the last attempt failed.
+        error: Option<Error>,
+    },
+    /// The router granted `mapping`. `error` says why the last renewal
+    /// failed, if it did; the mapping stays until it expires.
+    Mapped {
+        /// The granted mapping.
+        mapping: Mapping,
+        /// Why the last renewal failed.
+        error: Option<Error>,
+    },
+    /// The task has stopped. `error` says why the release failed, or, with
+    /// no mapping to release, why the last attempt failed.
+    Stopped {
+        /// Why the release, or the last attempt, failed.
+        error: Option<Error>,
+    },
+}
+
+impl Status {
+    /// The granted mapping, if any.
+    #[must_use]
+    pub fn mapping(&self) -> Option<Mapping> {
+        match self {
+            Status::Mapped { mapping, .. } => Some(*mapping),
+            Status::Unmapped { .. } | Status::Stopped { .. } => None,
+        }
+    }
+
+    /// Why the last request failed, if it did.
+    #[must_use]
+    pub fn error(&self) -> Option<&Error> {
+        match self {
+            Status::Unmapped { error }
+            | Status::Mapped { error, .. }
+            | Status::Stopped { error } => error.as_ref(),
+        }
+    }
+}
+
 /// What to map, and how.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
@@ -267,8 +316,11 @@ impl Config {
 #[must_use = "dropping the handle releases the mapping"]
 pub struct PortMapping {
     commands: mpsc::Sender<Command>,
+    local_port: NonZeroU16,
+    /// Changes after `status`, so a user that sees a new mapping here also
+    /// sees it in `status`.
     state: watch::Receiver<Option<Mapping>>,
-    errors: watch::Receiver<Option<Error>>,
+    status: watch::Receiver<Status>,
 }
 
 impl PortMapping {
@@ -283,20 +335,39 @@ impl PortMapping {
 
     fn start_with(config: Config, targets: Targets) -> Self {
         let (commands, receiver) = mpsc::channel(4);
-        let (sender, state) = watch::channel(None);
-        let (error_sender, errors) = watch::channel(None);
-        tokio::spawn(mapper::run(config, targets, receiver, sender, error_sender));
+        let local_port = config.local_port;
+        let (state_sender, state) = watch::channel(None);
+        let (status_sender, status) = watch::channel(Status::Unmapped { error: None });
+        let report = mapper::Report {
+            state: state_sender,
+            status: status_sender,
+        };
+        tokio::spawn(mapper::run(config, targets, receiver, report));
         Self {
             commands,
+            local_port,
             state,
-            errors,
+            status,
         }
+    }
+
+    /// The local port that the mapping is for.
+    #[must_use]
+    pub fn local_port(&self) -> NonZeroU16 {
+        self.local_port
+    }
+
+    /// The mapping and the last error, read together, so they always
+    /// agree.
+    #[must_use]
+    pub fn status(&self) -> Status {
+        self.status.borrow().clone()
     }
 
     /// The mapping the router has granted, if any.
     #[must_use]
     pub fn mapping(&self) -> Option<Mapping> {
-        *self.state.borrow()
+        self.status.borrow().mapping()
     }
 
     /// A receiver for [`mapping`](Self::mapping). It always has the newest
@@ -313,7 +384,7 @@ impl PortMapping {
     /// `debug` level otherwise.
     #[must_use]
     pub fn last_error(&self) -> Option<Error> {
-        self.errors.borrow().clone()
+        self.status.borrow().error().cloned()
     }
 
     /// Asks the router again now: renews the mapping, or tries to get one.

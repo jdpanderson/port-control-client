@@ -5,7 +5,17 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `PortMapping::status` and `Status`: the mapping and the last error in
+  one snapshot, so they always agree. Reading `mapping()` and then
+  `last_error()` could show a new error with an old mapping.
+- `PortMapping::local_port`, the local port that the mapping is for.
+
 ### Changed
+
+- `mapping()` and `last_error()` read the same snapshot as `status()`.
+  What they return does not change.
 
 - `tracing` is built without its default features, so `tracing-attributes`
   and its `syn` are no longer dependencies.

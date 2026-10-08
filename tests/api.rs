@@ -4,7 +4,7 @@
 use std::{num::NonZeroU16, time::Duration};
 
 use port_control_client::{
-    Cause, Config, Error, ErrorKind, Mapping, Method, PortMapping, Protocol,
+    Cause, Config, Error, ErrorKind, Mapping, Method, PortMapping, Protocol, Status,
 };
 
 fn port() -> NonZeroU16 {
@@ -23,6 +23,7 @@ fn types_are_thread_safe() {
     thread_safe::<PortMapping>();
     thread_safe::<Config>();
     thread_safe::<Mapping>();
+    thread_safe::<Status>();
     thread_safe::<Method>();
     thread_safe::<Protocol>();
     thread_safe::<Error>();
@@ -118,6 +119,26 @@ async fn last_error_says_why() {
     assert_eq!(cause.kind(), ErrorKind::NoProtocol);
     assert_eq!(error.to_string(), "PCP, NAT-PMP and UPnP are all off");
     mapping.stop().await;
+}
+
+#[tokio::test]
+async fn status_holds_the_mapping_and_the_error_together() {
+    let mapping = PortMapping::start(offline());
+    assert_eq!(mapping.local_port(), port());
+    // The task has not run yet: this test's runtime has one thread.
+    assert_eq!(mapping.status(), Status::Unmapped { error: None });
+    let error = first_error(&mapping).await;
+    let status = mapping.status();
+    assert_eq!(
+        status,
+        Status::Unmapped {
+            error: Some(error.clone())
+        }
+    );
+    assert_eq!((status.mapping(), status.error()), (None, Some(&error)));
+    // With no mapping to release, the last error stays.
+    mapping.stop().await;
+    assert_eq!(mapping.status(), Status::Stopped { error: Some(error) });
 }
 
 #[tokio::test]

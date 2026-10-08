@@ -23,7 +23,7 @@ use crate::udp;
 #[cfg(feature = "upnp")]
 use crate::upnp::{self, ssdp};
 use crate::{
-    Config, Mapping, Method,
+    Config, Mapping, Method, Status,
     error::{Error, Failure, Result},
     gateway,
 };
@@ -189,15 +189,46 @@ struct Held {
     expires: Instant,
 }
 
+/// Where the task shows what it has.
+#[derive(Debug)]
+pub(crate) struct Report {
+    /// The current mapping, for `PortMapping::watch`.
+    pub(crate) state: watch::Sender<Option<Mapping>>,
+    /// The mapping and the last error together.
+    pub(crate) status: watch::Sender<Status>,
+}
+
+impl Report {
+    fn shown(&self) -> bool {
+        self.state.borrow().is_some()
+    }
+
+    /// Shows `status`. `state` changes last, so a user that sees a new
+    /// mapping in `state` also sees it in `status`.
+    fn show(&self, status: Status) {
+        let mapping = status.mapping();
+        self.status.send_replace(status);
+        self.state.send_if_modified(|current| {
+            let changed = *current != mapping;
+            *current = mapping;
+            changed
+        });
+    }
+
+    /// The held mapping has expired. The last error stays.
+    fn expire(&self) {
+        let error = self.status.borrow().error().cloned();
+        self.show(Status::Unmapped { error });
+    }
+}
+
 /// Runs until a `Stop` command, or until every handle is dropped. Each
-/// step gets a mapping or renews one. `state` shows the current mapping,
-/// and `errors` why the last step failed.
+/// step gets a mapping or renews one, and `report` shows the result.
 pub(crate) async fn run(
     config: Config,
     targets: Targets,
     mut commands: mpsc::Receiver<Command>,
-    state: watch::Sender<Option<Mapping>>,
-    errors: watch::Sender<Option<Error>>,
+    report: Report,
 ) {
     let mut held: Option<Held> = None;
     let mut nonce = Nonce::default();
@@ -209,11 +240,10 @@ pub(crate) async fn run(
         // The wait for the next step, or the step itself, can last past the
         // expiry: stop showing the mapping then.
         let expires = held.as_ref().map(|h| h.expires);
-        let shown = || state.borrow().is_some();
         tokio::select! {
             () = sleep_until(next) => {}
-            () = sleep_until(expires.unwrap_or_else(Instant::now)), if expires.is_some() && shown() => {
-                state.send_replace(None);
+            () = sleep_until(expires.unwrap_or_else(Instant::now)), if expires.is_some() && report.shown() => {
+                report.expire();
                 continue;
             }
             delay = restarts.next(held.as_mut(), &targets) => {
@@ -222,7 +252,7 @@ pub(crate) async fn run(
                 continue;
             }
             command = commands.recv() => if let Some(stop) = Stop::from(command) {
-                return finish(held, &state, &errors, stop).await;
+                return finish(held, &report, stop).await;
             },
         }
         // A stop during a step drops the step. A mapping that a dropped
@@ -236,8 +266,8 @@ pub(crate) async fn run(
             loop {
                 tokio::select! {
                     outcome = &mut work => break Ok(outcome),
-                    () = sleep_until(expires.unwrap_or_else(Instant::now)), if expires.is_some() && shown() => {
-                        state.send_replace(None);
+                    () = sleep_until(expires.unwrap_or_else(Instant::now)), if expires.is_some() && report.shown() => {
+                        report.expire();
                     }
                     command = commands.recv() => match Stop::from(command) {
                         Some(stop) => break Err(stop),
@@ -248,7 +278,7 @@ pub(crate) async fn run(
         };
         let outcome = match outcome {
             Ok(outcome) => outcome,
-            Err(stop) => return finish(held, &state, &errors, stop).await,
+            Err(stop) => return finish(held, &report, stop).await,
         };
         held = outcome.held;
         last_step = Instant::now();
@@ -259,14 +289,13 @@ pub(crate) async fn run(
             } else {
                 outcome.wait.max(MIN_WAIT)
             };
-        // The error first: a user that sees a new mapping must not see the
-        // old error.
-        errors.send_replace(outcome.error);
-        let mapping = held.as_ref().map(|h| h.lease.mapping());
-        state.send_if_modified(|current| {
-            let changed = *current != mapping;
-            *current = mapping;
-            changed
+        let error = outcome.error;
+        report.show(match &held {
+            Some(h) => Status::Mapped {
+                mapping: h.lease.mapping(),
+                error,
+            },
+            None => Status::Unmapped { error },
         });
     }
 }
@@ -665,13 +694,9 @@ impl Stop {
     }
 }
 
-async fn finish(
-    held: Option<Held>,
-    state: &watch::Sender<Option<Mapping>>,
-    errors: &watch::Sender<Option<Error>>,
-    Stop(done): Stop,
-) {
-    state.send_replace(None);
+async fn finish(held: Option<Held>, report: &Report, Stop(done): Stop) {
+    let error = report.status.borrow().error().cloned();
+    report.show(Status::Stopped { error });
     if let Some(held) = held {
         let mapping = held.lease.mapping();
         let release = async {
@@ -690,12 +715,12 @@ async fn finish(
         match result {
             Ok(()) => {
                 info!(external = %mapping.external, "released the port mapping");
-                errors.send_replace(None);
+                report.show(Status::Stopped { error: None });
             }
             Err(failure) => {
                 let error = Error::new(vec![failure.cause(Some(mapping.method))]);
                 debug!(external = %mapping.external, "can't release the port mapping: {error}");
-                errors.send_replace(Some(error));
+                report.show(Status::Stopped { error: Some(error) });
             }
         }
     }

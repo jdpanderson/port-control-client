@@ -61,6 +61,8 @@ To test it on your network: `cargo run --example map -- udp 51820`.
   or gateway, end the mapping, and the task asks for a new one.
 - `last_error()` gives one cause for each protocol tried. It is `None`
   after an attempt works. After `stop()`, it shows if the release failed.
+- `status()` gives the mapping and the last error together, in one
+  snapshot, so they always agree.
 - `stop()` releases the mapping and waits up to two seconds. Dropping the
   handle releases it in the background.
 - If the external port is in use, UPnP tries other ports. If the gateway
