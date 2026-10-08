@@ -5,6 +5,8 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-07
+
 ### Added
 
 - `PortMapping::status` and `Status`: the mapping and the last error in
