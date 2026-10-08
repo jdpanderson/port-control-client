@@ -19,6 +19,8 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `tracing` is built without its default features, so `tracing-attributes`
   and its `syn` are no longer dependencies.
+- CI fuzzes each target for 10 seconds, not 30, so the fuzz job takes
+  about 2 minutes instead of over 4.
 
 ## [0.2.1] - 2026-10-05
 

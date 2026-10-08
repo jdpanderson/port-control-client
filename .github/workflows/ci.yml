@@ -190,11 +190,11 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked --version 0.13.2
-      - name: Fuzz each target for 30 seconds
+      - name: Fuzz each target for 10 seconds
         run: |
           for target in $(cargo fuzz list); do
             mkdir -p "fuzz/corpus/$target"
-            cargo fuzz run "$target" "fuzz/corpus/$target" "fuzz/seeds/$target" -- -max_total_time=30
+            cargo fuzz run "$target" "fuzz/corpus/$target" "fuzz/seeds/$target" -- -max_total_time=10
           done
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: failure()
